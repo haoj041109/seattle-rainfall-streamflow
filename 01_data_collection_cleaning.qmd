@@ -1,0 +1,6727 @@
+---
+title: "Seattle Rainfall and Streamflow Prediction"
+subtitle: "Daily Precipitation, Streamflow, and Model Evaluation, 2015–2025"
+format:
+  html:
+    toc: false
+    number-sections: false
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    embed-resources: true
+    self-contained-math: true
+    html-math-method: katex
+jupyter: python3
+---
+
+```{=html}
+<style>
+#quarto-content > main.content {
+  grid-column: 1 / -1 !important;
+  width: min(1400px, calc(100vw - 120px));
+  max-width: none !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  justify-self: center !important;
+}
+
+#title-block-header {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+#report-tabs {
+  width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+#report-tabs > .nav-tabs {
+  width: 100%;
+  justify-content: center;
+}
+</style>
+```
+
+::: {#report-tabs .panel-tabset}
+
+# Data Preparation
+
+## Part 1 — Data Source
+
+I used daily weather records from NOAA Seattle Sand Point (`USW00094290`).
+The requested period is January 1, 2015 through December 31, 2025.
+The CSV was requested in metric units.
+
+This is a single-station weather dataset, not a dataset of observed flooding.
+
+## Part 2 — Load the Data
+
+```{python}
+import pandas as pd
+
+weather_raw = pd.read_csv(
+    "Data/Raw/seattle_sand_point_2015_2025.csv"
+)
+
+weather_raw.head()
+```
+
+## Part 3 — Initial Data Inspection
+
+Inspect the data before changing any values.
+
+### 3.1 Dataset Dimensions
+
+```{python}
+weather_raw.shape
+```
+
+### 3.2 Column Names
+
+```{python}
+weather_raw.columns
+```
+
+### 3.3 Data Types
+
+```{python}
+weather_raw.info()
+```
+
+### 3.4 Missing Values
+
+```{python}
+weather_raw.isna().sum()
+```
+
+### 3.5 Date Range
+
+```{python}
+print(
+    "First date:",
+    weather_raw["DATE"].min()
+)
+
+print(
+    "Last date:",
+    weather_raw["DATE"].max()
+)
+```
+
+### 3.6 Number of Stations
+
+```{python}
+weather_raw[
+    "STATION"
+].nunique()
+```
+
+### 3.7 Duplicate Rows
+
+```{python}
+weather_raw.duplicated().sum()
+```
+
+### 3.8 Duplicate Station-Date Records
+
+Two records can have the same station and date without being identical rows.
+
+```{python}
+weather_raw.duplicated(
+    subset=[
+        "STATION",
+        "DATE"
+    ]
+).sum()
+```
+
+### 3.9 Precipitation Summary
+
+```{python}
+weather_raw[
+    "PRCP"
+].describe()
+```
+
+### 3.10 Missing Dates
+
+Compare the recorded dates with the requested calendar.
+
+```{python}
+study_start = pd.Timestamp(
+    "2015-01-01"
+)
+
+study_end = pd.Timestamp(
+    "2025-12-31"
+)
+
+raw_dates = pd.to_datetime(
+    weather_raw["DATE"],
+    format="%Y-%m-%d"
+)
+
+if raw_dates.isna().any():
+    raise ValueError(
+        "A date is missing. Review the source file."
+    )
+
+full_date_range = pd.date_range(
+    study_start,
+    study_end,
+    freq="D"
+)
+
+missing_dates = (
+    full_date_range.difference(
+        raw_dates
+    )
+)
+
+print(
+    "Missing dates:",
+    len(
+        missing_dates
+    )
+)
+
+missing_dates
+```
+
+### 3.11 Missing Precipitation Observations
+
+```{python}
+missing_prcp = (
+    weather_raw[
+        "PRCP"
+    ].isna()
+)
+
+weather_raw.loc[
+    missing_prcp,
+    [
+        "DATE",
+        "PRCP",
+        "PRCP_ATTRIBUTES"
+    ]
+]
+```
+
+### 3.12 Inspection Findings
+
+The source contains 3,989 records and no duplicate rows or station-date keys.
+
+Two recorded dates have missing precipitation values.
+
+Another 29 dates, June 1–29, 2023, are absent from the file entirely.
+
+Missing rainfall is not zero rainfall. The file does not establish why
+these observations are missing.
+
+## Part 4 — Data Cleaning
+
+`weather_raw` is the original in-memory table.
+
+`weather` is a separate working copy.
+
+Neither the raw table nor the source CSV is overwritten.
+
+### 4.1 Create a Working Copy
+
+```{python}
+weather = weather_raw.copy()
+```
+
+### 4.2 Convert Date to Datetime
+
+```{python}
+weather[
+    "DATE"
+] = raw_dates
+
+weather[
+    "DATE"
+].dtype
+```
+
+### 4.3 Validate the Station-Date Structure
+
+```{python}
+if weather[
+    "STATION"
+].isna().any():
+    raise ValueError(
+        "A station ID is missing."
+    )
+
+if weather[
+    "STATION"
+].nunique() != 1:
+    raise ValueError(
+        "This procedure is for one station only."
+    )
+
+if weather.duplicated(
+    subset=[
+        "STATION",
+        "DATE"
+    ]
+).any():
+    raise ValueError(
+        "Resolve duplicate station-date records first."
+    )
+
+if weather[
+    "DATE"
+].min() < study_start:
+    raise ValueError(
+        "A date is earlier than the study period."
+    )
+
+if weather[
+    "DATE"
+].max() > study_end:
+    raise ValueError(
+        "A date is later than the study period."
+    )
+
+weather = weather.sort_values(
+    "DATE"
+)
+
+weather = weather.reset_index(
+    drop=True
+)
+```
+
+### 4.4 Remove Empty Variables
+
+Removed `TAVG` and its attributes only after confirming that they are
+entirely missing.
+
+```{python}
+empty_columns = [
+    "TAVG",
+    "TAVG_ATTRIBUTES"
+]
+
+for column in empty_columns:
+
+    if weather[
+        column
+    ].notna().any():
+
+        raise ValueError(
+            "This column is not entirely empty: "
+            + column
+        )
+
+weather = weather.drop(
+    columns=empty_columns
+)
+```
+
+### 4.5 Restore Missing Calendar Dates
+
+`reindex` adds absent dates but does not create rainfall measurements.
+
+```{python}
+weather = weather.set_index(
+    "DATE"
+)
+
+weather = weather.reindex(
+    full_date_range
+)
+
+weather.index.name = "DATE"
+
+weather = weather.reset_index()
+
+weather[
+    "ROW_MISSING"
+] = weather[
+    "DATE"
+].isin(
+    missing_dates
+)
+```
+
+### 4.6 Restore Station Metadata
+
+Fill only station metadata that have one known value in this export.
+
+Do not fill weather measurements or observation attributes.
+
+```{python}
+station_columns = [
+    "STATION",
+    "NAME",
+    "LATITUDE",
+    "LONGITUDE",
+    "ELEVATION"
+]
+
+for column in station_columns:
+
+    known_values = (
+        weather_raw[
+            column
+        ]
+        .dropna()
+        .unique()
+    )
+
+    if len(
+        known_values
+    ) != 1:
+
+        raise ValueError(
+            "Review station metadata: "
+            + column
+        )
+
+    station_value = (
+        known_values[0]
+    )
+
+    weather[
+        column
+    ] = weather[
+        column
+    ].fillna(
+        station_value
+    )
+```
+
+### 4.7 Flag Missing Precipitation
+
+```{python}
+weather[
+    "PRCP_MISSING"
+] = weather[
+    "PRCP"
+].isna()
+
+weather[
+    "PRCP_MISSING"
+].value_counts()
+```
+
+```{python}
+pd.crosstab(
+    weather[
+        "ROW_MISSING"
+    ],
+    weather[
+        "PRCP_MISSING"
+    ]
+)
+```
+
+### 4.8 Verify the Cleaned Time Series
+
+```{python}
+print(
+    "First date:",
+    weather[
+        "DATE"
+    ].min()
+)
+
+print(
+    "Last date:",
+    weather[
+        "DATE"
+    ].max()
+)
+
+print(
+    "Calendar days:",
+    len(
+        full_date_range
+    )
+)
+
+print(
+    "Rows after cleaning:",
+    len(
+        weather
+    )
+)
+
+print(
+    "Duplicate dates:",
+    weather[
+        "DATE"
+    ].duplicated().sum()
+)
+
+print(
+    "Inserted dates:",
+    weather[
+        "ROW_MISSING"
+    ].sum()
+)
+
+weather.isna().sum()
+```
+
+## Part 5 — Quality-Flag Review
+
+The NOAA attributes contain the measurement flag first and the quality
+flag second.
+
+Quality flag `I` means an internal-consistency check failed; it does not
+provide a replacement value.[^noaa-flags]
+
+### 5.1 Read the Quality Flags
+
+```{python}
+variables = [
+    "PRCP",
+    "TMAX",
+    "TMIN",
+    "SNOW",
+    "SNWD"
+]
+
+quality_flags = pd.DataFrame(
+    index=weather.index
+)
+
+for variable in variables:
+
+    attribute_column = (
+        variable
+        + "_ATTRIBUTES"
+    )
+
+    attributes = weather[
+        attribute_column
+    ].astype(
+        "string"
+    )
+
+    parts = attributes.str.split(
+        ","
+    )
+
+    quality_flag = (
+        parts.str[1]
+    )
+
+    quality_flag = (
+        quality_flag.str.strip()
+    )
+
+    observed_rows = weather[
+        variable
+    ].notna()
+
+    if quality_flag[
+        observed_rows
+    ].isna().any():
+
+        raise ValueError(
+            "Review the attributes for "
+            + variable
+        )
+
+    quality_flags[
+        variable
+    ] = quality_flag
+```
+
+### 5.2 List Flagged Observations
+
+```{python}
+for variable in variables:
+
+    quality_flag = quality_flags[
+        variable
+    ]
+
+    flagged_rows = (
+        quality_flag.fillna("")
+        != ""
+    )
+
+    columns_to_show = [
+        "DATE",
+        variable,
+        variable + "_ATTRIBUTES"
+    ]
+
+    print(
+        "\nVariable:",
+        variable
+    )
+
+    if flagged_rows.sum() == 0:
+
+        print(
+            "No nonblank quality flags."
+        )
+
+    else:
+
+        flagged_values = weather.loc[
+            flagged_rows,
+            columns_to_show
+        ]
+
+        print(
+            flagged_values.to_string(
+                index=False
+            )
+        )
+```
+
+### 5.3 Inspect Trace Precipitation
+
+Measurement flag `T` means trace precipitation, not a missing measurement
+or a quality exclusion.[^noaa-flags]
+
+```{python}
+attributes = weather[
+    "PRCP_ATTRIBUTES"
+].astype(
+    "string"
+)
+
+parts = attributes.str.split(
+    ","
+)
+
+prcp_measurement_flag = (
+    parts.str[0]
+)
+
+prcp_measurement_flag = (
+    prcp_measurement_flag.str.strip()
+)
+
+prcp_measurement_flag = (
+    prcp_measurement_flag.astype(
+        "string"
+    )
+)
+
+trace_days = (
+    prcp_measurement_flag
+    == "T"
+)
+
+print(
+    "Trace precipitation records:",
+    trace_days.sum()
+)
+
+weather.loc[
+    trace_days.fillna(
+        False
+    ),
+    [
+        "DATE",
+        "PRCP",
+        "PRCP_ATTRIBUTES"
+    ]
+].head()
+```
+
+## Part 6 — Finalize the Cleaned Dataset
+
+### 6.1 Quality-Control Policy
+
+The first-version rule excludes measurements with nonblank quality flags.
+
+Only the affected values become missing; entire dates are not deleted.
+
+This is a conservative analysis choice, not proof that every flagged value
+is wrong.[^noaa-flags]
+
+### 6.2 Apply Quality Flags
+
+```{python}
+weather_clean = (
+    weather.copy()
+)
+
+qc_summary = pd.DataFrame(
+    index=variables
+)
+
+qc_summary.index.name = (
+    "Variable"
+)
+
+qc_summary[
+    "Missing before QC"
+] = weather[
+    variables
+].isna().sum()
+
+qc_summary[
+    "Excluded by QC"
+] = 0
+
+for variable in variables:
+
+    quality_flag = (
+        quality_flags[
+            variable
+        ]
+    )
+
+    has_quality_flag = (
+        quality_flag.fillna("")
+        != ""
+    )
+
+    has_value = (
+        weather[
+            variable
+        ].notna()
+    )
+
+    excluded = (
+        has_quality_flag
+        & has_value
+    )
+
+    weather_clean[
+        variable
+        + "_QC_EXCLUDED"
+    ] = excluded
+
+    weather_clean.loc[
+        has_quality_flag,
+        variable
+    ] = float(
+        "nan"
+    )
+
+    qc_summary.loc[
+        variable,
+        "Excluded by QC"
+    ] = excluded.sum()
+
+qc_summary[
+    "Missing after QC"
+] = weather_clean[
+    variables
+].isna().sum()
+
+qc_summary
+```
+
+### 6.3 Preserve Trace and Missingness Information
+
+```{python}
+weather_clean[
+    "PRCP_TRACE"
+] = trace_days
+
+weather_clean[
+    "PRCP_MISSING"
+] = weather_clean[
+    "PRCP"
+].isna()
+
+weather_clean[
+    "PRCP_TRACE"
+].value_counts(
+    dropna=False
+)
+```
+
+### 6.4 Basic Physical Checks
+
+Check the negative precipitation and snow amounts, inconsistent daily
+minimum/maximum temperatures, and infinite values.
+
+Large rainfall values are not removed merely because they are unusual.
+
+```{python}
+negative_prcp = (
+    weather_clean[
+        "PRCP"
+    ]
+    < 0
+).sum()
+
+negative_snow = (
+    weather_clean[
+        "SNOW"
+    ]
+    < 0
+).sum()
+
+negative_snwd = (
+    weather_clean[
+        "SNWD"
+    ]
+    < 0
+).sum()
+
+bad_temperatures = (
+    weather_clean[
+        "TMIN"
+    ]
+    > weather_clean[
+        "TMAX"
+    ]
+).sum()
+
+infinite_values = 0
+
+for variable in variables:
+
+    positive_inf = (
+        weather_clean[
+            variable
+        ]
+        == float(
+            "inf"
+        )
+    ).sum()
+
+    negative_inf = (
+        weather_clean[
+            variable
+        ]
+        == float(
+            "-inf"
+        )
+    ).sum()
+
+    infinite_values = (
+        infinite_values
+        + positive_inf
+        + negative_inf
+    )
+
+physical_checks = pd.DataFrame()
+
+physical_checks[
+    "Check"
+] = [
+    "Negative PRCP",
+    "Negative SNOW",
+    "Negative SNWD",
+    "TMIN greater than TMAX",
+    "Infinite measurements"
+]
+
+physical_checks[
+    "Count"
+] = [
+    negative_prcp,
+    negative_snow,
+    negative_snwd,
+    bad_temperatures,
+    infinite_values
+]
+
+physical_checks
+```
+
+```{python}
+if physical_checks[
+    "Count"
+].sum() != 0:
+
+    raise ValueError(
+        "Review the physical checks before saving."
+    )
+
+print(
+    "Basic physical checks passed."
+)
+```
+
+### 6.5 Units and Column Definitions
+
+The original measurement names and metric units are retained.[^noaa-flags]
+
+| Column | Meaning | Unit or coding |
+|---|---|---|
+| `PRCP` | Daily precipitation | mm |
+| `TMAX`, `TMIN` | Daily maximum/minimum temperature | degrees Celsius |
+| `SNOW`, `SNWD` | Snowfall / snow depth | mm |
+| `ROW_MISSING` | Date absent from source CSV | True / False |
+| `PRCP_MISSING` | Precipitation unavailable after QC | True / False |
+| `PRCP_TRACE` | Recorded trace flag | True / False / missing |
+| `*_QC_EXCLUDED` | Existing value excluded by QC rule | True / False |
+| `*_ATTRIBUTES` | Original observation attributes | Unchanged text |
+
+### 6.6 Save the Cleaned Dataset
+
+```{python}
+from pathlib import Path
+
+processed_dir = Path(
+    "Data/Processed"
+)
+
+processed_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+output_path = (
+    "Data/Processed/"
+    "seattle_sand_point_cleaned_2015_2025.csv"
+)
+
+weather_clean.to_csv(
+    output_path,
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep="",
+    encoding="utf-8"
+)
+
+print(
+    "Saved:",
+    output_path
+)
+
+print(
+    "Rows:",
+    len(
+        weather_clean
+    )
+)
+
+print(
+    "Columns:",
+    weather_clean.shape[1]
+)
+```
+
+## Part 7 — Exploratory Data Analysis
+
+This section examines data coverage, daily precipitation, its distribution,
+and seasonal differences.
+
+It describes one station during 2015–2025, not observed flood events.
+
+### 7.1 Prepare the EDA Data
+
+```{python}
+import matplotlib.pyplot as plt
+
+eda = weather_clean[
+    [
+        "DATE",
+        "PRCP"
+    ]
+].copy()
+
+eda = eda.sort_values(
+    "DATE"
+)
+
+eda[
+    "YEAR"
+] = eda[
+    "DATE"
+].dt.year
+
+eda[
+    "MONTH"
+] = eda[
+    "DATE"
+].dt.month
+
+if eda[
+    "PRCP"
+].notna().sum() == 0:
+
+    raise ValueError(
+        "No precipitation observations are available for EDA."
+    )
+```
+
+### 7.2 Check Monthly Coverage Before Calculating Totals
+
+A month is included in monthly-total comparisons only if every day has a
+retained precipitation value.
+
+Available days from incomplete months remain in the daily analysis.
+
+```{python}
+monthly_groups = (
+    eda.groupby(
+        [
+            "YEAR",
+            "MONTH"
+        ]
+    )
+)
+
+monthly = pd.DataFrame()
+
+monthly[
+    "expected_days"
+] = monthly_groups.size()
+
+monthly[
+    "observed_days"
+] = monthly_groups[
+    "PRCP"
+].count()
+
+monthly[
+    "observed_sum_mm"
+] = monthly_groups[
+    "PRCP"
+].sum(
+    min_count=1
+)
+
+monthly = monthly.reset_index()
+
+monthly[
+    "missing_days"
+] = (
+    monthly[
+        "expected_days"
+    ]
+    - monthly[
+        "observed_days"
+    ]
+)
+
+monthly[
+    "coverage_pct"
+] = (
+    100
+    * monthly[
+        "observed_days"
+    ]
+    / monthly[
+        "expected_days"
+    ]
+)
+
+monthly[
+    "complete"
+] = (
+    monthly[
+        "observed_days"
+    ]
+    == monthly[
+        "expected_days"
+    ]
+)
+
+monthly[
+    "total_mm"
+] = monthly[
+    "observed_sum_mm"
+]
+
+incomplete_months = (
+    monthly[
+        "complete"
+    ]
+    == False
+)
+
+monthly.loc[
+    incomplete_months,
+    "total_mm"
+] = float(
+    "nan"
+)
+
+coverage_columns = [
+    "YEAR",
+    "MONTH",
+    "expected_days",
+    "observed_days",
+    "missing_days",
+    "coverage_pct"
+]
+
+monthly.loc[
+    incomplete_months,
+    coverage_columns
+].round(
+    2
+)
+```
+
+### 7.3 Daily Precipitation Through Time
+
+Missing values remain gaps.
+
+```{python}
+#| label: fig-daily-precipitation
+#| fig-cap: "Daily precipitation at Seattle Sand Point, 2015–2025. Missing values remain gaps."
+#| fig-align: center
+
+plt.figure(
+    figsize=(
+        10,
+        4
+    )
+)
+
+plt.plot(
+    eda[
+        "DATE"
+    ],
+    eda[
+        "PRCP"
+    ],
+    linewidth=0.7
+)
+
+plt.title(
+    "Daily Precipitation at Seattle Sand Point"
+)
+
+plt.xlabel(
+    "Year"
+)
+
+plt.ylabel(
+    "Precipitation (mm)"
+)
+
+plt.xlim(
+    study_start,
+    study_end
+)
+
+plt.ylim(
+    bottom=0
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 7.4 Distribution of Daily Precipitation
+
+Missing values are excluded only from this numerical summary and histogram.
+
+Reported zeros include trace observations.[^noaa-flags]
+
+```{python}
+observed_prcp = (
+    eda[
+        "PRCP"
+    ].dropna()
+)
+
+prcp_summary = (
+    observed_prcp.describe(
+        percentiles=[
+            0.50,
+            0.90,
+            0.95,
+            0.99
+        ]
+    )
+)
+
+prcp_summary.round(
+    2
+)
+```
+
+```{python}
+#| label: fig-precipitation-distribution
+#| fig-cap: "Distribution of all available daily precipitation amounts. The frequency axis uses a logarithmic scale."
+#| fig-align: center
+
+plt.figure(
+    figsize=(
+        9,
+        4
+    )
+)
+
+plt.hist(
+    observed_prcp,
+    bins=40,
+    rwidth=0.9,
+    log=True
+)
+
+plt.title(
+    "Distribution of Daily Precipitation"
+)
+
+plt.xlabel(
+    "Daily precipitation (mm)"
+)
+
+plt.ylabel(
+    "Number of observed days (log scale)"
+)
+
+plt.yticks(
+    [
+        1,
+        10,
+        100,
+        1000
+    ],
+    [
+        "1",
+        "10",
+        "100",
+        "1000"
+    ]
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 7.5 Seasonal Pattern from Complete Months
+
+```{python}
+month_groups = (
+    monthly.groupby(
+        "MONTH"
+    )[
+        "total_mm"
+    ]
+)
+
+seasonal = pd.DataFrame(
+    index=range(
+        1,
+        13
+    )
+)
+
+seasonal[
+    "complete_months"
+] = month_groups.count()
+
+seasonal[
+    "mean_total_mm"
+] = month_groups.mean()
+
+seasonal[
+    "median_total_mm"
+] = month_groups.median()
+
+month_names = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+]
+
+seasonal.index = (
+    month_names
+)
+
+seasonal.index.name = (
+    "Month"
+)
+
+seasonal.round(
+    2
+)
+```
+
+```{python}
+#| label: fig-seasonal-precipitation
+#| fig-cap: "Mean monthly precipitation totals from complete months only."
+#| fig-align: center
+
+plt.figure(
+    figsize=(
+        9,
+        4
+    )
+)
+
+plt.bar(
+    seasonal.index,
+    seasonal[
+        "mean_total_mm"
+    ]
+)
+
+plt.title(
+    "Seasonal Pattern at Seattle Sand Point"
+)
+
+plt.xlabel(
+    "Calendar month"
+)
+
+plt.ylabel(
+    "Mean monthly total (mm)"
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 7.6 Interpretation Boundaries
+
+These summaries describe this station sample, not precipitation at every
+Seattle location.
+
+Missing measurements have not been estimated.
+
+Large daily rainfall is not itself evidence of flooding.
+
+These plots do not establish flood occurrence, flood mechanisms, or
+long-term climate trends.
+
+### 7.7 EDA Findings
+
+Among the 3,987 available daily precipitation records, the mean is about
+2.72 mm, the median is 0 mm, and the maximum is 67.1 mm.
+
+The distribution is strongly right-skewed.
+
+The complete-month comparison uses 129 of the 132 year-months.
+
+December has the highest sample mean monthly total, about 163.48 mm, while
+July has the lowest, about 9.16 mm.
+
+These are descriptive results for this station and study period.
+
+## Part 8 — Rainfall Feature Engineering
+
+### 8.1 Define the Time Convention
+
+Let $P_t$ be the reported precipitation for date $t$.
+
+We construct:
+
+$$
+R_{1,t}
+=
+P_{t-1}
+$$
+
+$$
+R_{3,t}
+=
+P_{t-1}
++
+P_{t-2}
++
+P_{t-3}
+$$
+
+$$
+R_{7,t}
+=
+\sum_{i=1}^{7}
+P_{t-i}
+$$
+
+These features exclude $P_t$.
+
+The provisional prediction convention is to use observations through date
+$t-1$ when predicting an outcome labeled date $t$.
+
+The 1-, 3-, and 7-day windows are starting choices, not proven optimal
+hydrologic windows.
+
+### 8.2 Prepare the Feature Table
+
+```{python}
+features = weather_clean[
+    [
+        "STATION",
+        "DATE",
+        "PRCP"
+    ]
+].copy()
+
+features = features.sort_values(
+    "DATE"
+)
+
+features = features.reset_index(
+    drop=True
+)
+
+expected_dates = pd.Series(
+    full_date_range
+)
+
+if not features[
+    "DATE"
+].equals(
+    expected_dates
+):
+
+    raise ValueError(
+        "Keep one row per calendar day before creating features."
+    )
+```
+
+### 8.3 Previous-Day Precipitation
+
+With the complete daily calendar, shifting values down one row places the
+previous day's precipitation beside the current date. The dates themselves
+stay unchanged.[^pandas-shift]
+
+```{python}
+features[
+    "RAIN_PREV_1D_MM"
+] = features[
+    "PRCP"
+].shift(
+    1
+)
+
+features[
+    [
+        "DATE",
+        "PRCP",
+        "RAIN_PREV_1D_MM"
+    ]
+].head(
+    10
+)
+```
+
+### 8.4 Previous Three-Day Precipitation
+
+Apply the rolling sum to the already shifted precipitation series.
+
+`min_periods=3` requires all three calendar-day values to be available;
+otherwise the feature remains missing.[^pandas-rolling]
+
+```{python}
+previous_rain = (
+    features[
+        "RAIN_PREV_1D_MM"
+    ]
+)
+
+window_3d = (
+    previous_rain.rolling(
+        window=3,
+        min_periods=3
+    )
+)
+
+features[
+    "RAIN_PREV_3D_MM"
+] = window_3d.sum()
+```
+
+### 8.5 Previous Seven-Day Precipitation
+
+The seven-day feature uses the same shifted rainfall series and requires
+all seven previous calendar-day values to be available.[^pandas-rolling]
+
+```{python}
+window_7d = (
+    previous_rain.rolling(
+        window=7,
+        min_periods=7
+    )
+)
+
+features[
+    "RAIN_PREV_7D_MM"
+] = window_7d.sum()
+
+display_columns = [
+    "DATE",
+    "PRCP",
+    "RAIN_PREV_1D_MM",
+    "RAIN_PREV_3D_MM",
+    "RAIN_PREV_7D_MM"
+]
+
+features[
+    display_columns
+].head(
+    10
+)
+```
+
+For January 8, 2015, the three-day feature uses January 5–7 and the
+seven-day feature uses January 1–7.
+
+Neither includes January 8.
+
+### 8.6 Visualize the Rainfall-History Features
+
+To make the feature construction easier to interpret, we display a short
+example period rather than the entire 2015–2025 record.
+
+The 1-day feature represents precipitation on the previous calendar day.
+
+The 3-day and 7-day features accumulate precipitation over progressively
+longer histories.
+
+All three exclude precipitation reported for the target date itself.
+
+```{python}
+#| label: fig-rainfall-history-features
+#| fig-cap: "Example of previous 1-, 3-, and 7-day rainfall-history features at Seattle Sand Point. Each feature uses precipitation before the date shown."
+#| fig-align: center
+
+feature_plot_start = pd.Timestamp(
+    "2015-01-01"
+)
+
+feature_plot_end = pd.Timestamp(
+    "2015-02-15"
+)
+
+feature_plot_rows = (
+    features[
+        "DATE"
+    ].between(
+        feature_plot_start,
+        feature_plot_end
+    )
+)
+
+feature_plot = (
+    features.loc[
+        feature_plot_rows,
+        [
+            "DATE",
+            "RAIN_PREV_1D_MM",
+            "RAIN_PREV_3D_MM",
+            "RAIN_PREV_7D_MM"
+        ]
+    ].copy()
+)
+
+plt.figure(
+    figsize=(
+        10,
+        5
+    )
+)
+
+plt.plot(
+    feature_plot[
+        "DATE"
+    ],
+    feature_plot[
+        "RAIN_PREV_1D_MM"
+    ],
+    label="Previous 1 day",
+    linewidth=1.2
+)
+
+plt.plot(
+    feature_plot[
+        "DATE"
+    ],
+    feature_plot[
+        "RAIN_PREV_3D_MM"
+    ],
+    label="Previous 3 days",
+    linewidth=1.2
+)
+
+plt.plot(
+    feature_plot[
+        "DATE"
+    ],
+    feature_plot[
+        "RAIN_PREV_7D_MM"
+    ],
+    label="Previous 7 days",
+    linewidth=1.2
+)
+
+plt.title(
+    "Example Rainfall-History Features"
+)
+
+plt.xlabel(
+    "Date"
+)
+
+plt.ylabel(
+    "Accumulated precipitation (mm)"
+)
+
+plt.ylim(
+    bottom=0
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+```
+
+The longer windows are smoother because each value contains rainfall from
+multiple preceding calendar days.
+
+A large seven-day value therefore does not mean that all precipitation
+occurred on the date shown.
+
+The first rows are missing by design because the study period does not
+contain enough earlier observations to construct complete histories.
+
+### 8.7 Check Feature Availability
+
+A feature can be missing because the study begins without enough previous
+history or because one of the required precipitation observations is
+missing.
+
+```{python}
+feature_columns = [
+    "RAIN_PREV_1D_MM",
+    "RAIN_PREV_3D_MM",
+    "RAIN_PREV_7D_MM"
+]
+
+feature_summary = pd.DataFrame(
+    index=feature_columns
+)
+
+feature_summary.index.name = (
+    "Feature"
+)
+
+feature_summary[
+    "Available days"
+] = features[
+    feature_columns
+].count()
+
+feature_summary[
+    "Missing days"
+] = features[
+    feature_columns
+].isna().sum()
+
+feature_summary
+```
+
+### 8.8 Inspect the Effect of the June 2023 Gap
+
+```{python}
+gap_example = (
+    features[
+        "DATE"
+    ].between(
+        "2023-06-28",
+        "2023-07-08"
+    )
+)
+
+features.loc[
+    gap_example,
+    display_columns
+]
+```
+
+No rainfall values are filled with zero to create complete windows.
+
+### 8.9 Save the Candidate Features
+
+```{python}
+feature_path = (
+    "Data/Processed/"
+    "seattle_sand_point_rainfall_features_2015_2025.csv"
+)
+
+features.to_csv(
+    feature_path,
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep="",
+    encoding="utf-8"
+)
+
+print(
+    "Saved:",
+    feature_path
+)
+
+print(
+    "Rows:",
+    len(
+        features
+    )
+)
+
+print(
+    "Columns:",
+    features.shape[1]
+)
+```
+
+## Part 9 — Hydrologic Outcome Data
+
+### 9.1 Source and Scope
+
+Use the daily export for King County site `58A`, requested for
+January 1, 2015 through December 31, 2025.
+
+The source file is `Hydrology_TOVMP.csv`.
+
+King County describes its daily streamflow product as average daily stream
+discharge rates.[^kc-daily-flow]
+
+The CSV reports stage in feet and discharge in cubic feet per second.
+
+The exact daily time boundaries, daylight-saving convention, and historical
+publication timing are not specified in this export.
+
+### 9.2 Load the Long Record
+
+```{python}
+streamflow_raw = pd.read_csv(
+    "Data/Raw/Hydrology_TOVMP.csv"
+)
+
+print(
+    "Raw dimensions:",
+    streamflow_raw.shape
+)
+
+streamflow_raw.head()
+```
+
+### 9.3 Prepare a Working Copy
+
+```{python}
+streamflow = (
+    streamflow_raw.copy()
+)
+
+streamflow = (
+    streamflow.rename(
+        columns={
+            "Site_Code":
+                "SITE_ID",
+
+            "Collect Date (local)":
+                "DATE_LOCAL",
+
+            "Stage (ft)":
+                "STAGE_FT",
+
+            "Discharge (cfs)":
+                "FLOW_CFS",
+
+            "E = Estimate; W = Warning; P = Provisional":
+                "FLAG"
+        }
+    )
+)
+
+streamflow[
+    "DATE_LOCAL"
+] = pd.to_datetime(
+    streamflow[
+        "DATE_LOCAL"
+    ],
+    format="%m/%d/%Y"
+)
+
+streamflow[
+    "STAGE_FT"
+] = pd.to_numeric(
+    streamflow[
+        "STAGE_FT"
+    ],
+    errors="raise"
+)
+
+streamflow[
+    "FLOW_CFS"
+] = pd.to_numeric(
+    streamflow[
+        "FLOW_CFS"
+    ],
+    errors="raise"
+)
+
+if streamflow[
+    "SITE_ID"
+].isna().any():
+
+    raise ValueError(
+        "A station ID is missing."
+    )
+
+if not (
+    streamflow[
+        "SITE_ID"
+    ]
+    == "58A"
+).all():
+
+    raise ValueError(
+        "This section expects only site 58A."
+    )
+
+if streamflow[
+    "DATE_LOCAL"
+].isna().any():
+
+    raise ValueError(
+        "A record has no date."
+    )
+
+if streamflow.duplicated(
+    subset=[
+        "SITE_ID",
+        "DATE_LOCAL"
+    ]
+).any():
+
+    raise ValueError(
+        "Review duplicate station-date records."
+    )
+
+streamflow = (
+    streamflow.sort_values(
+        "DATE_LOCAL"
+    )
+)
+
+streamflow = (
+    streamflow.reset_index(
+        drop=True
+    )
+)
+```
+
+### 9.4 Check Dates and Missing Measurements
+
+```{python}
+flow_calendar = pd.date_range(
+    "2015-01-01",
+    "2025-12-31",
+    freq="D"
+)
+
+missing_flow_dates = (
+    flow_calendar.difference(
+        streamflow[
+            "DATE_LOCAL"
+        ]
+    )
+)
+
+outside_period = (
+    streamflow[
+        "DATE_LOCAL"
+    ].isin(
+        flow_calendar
+    )
+    == False
+)
+
+if outside_period.any():
+
+    raise ValueError(
+        "Some dates are outside the requested period."
+    )
+
+print(
+    "First date:",
+    streamflow[
+        "DATE_LOCAL"
+    ].min()
+)
+
+print(
+    "Last date:",
+    streamflow[
+        "DATE_LOCAL"
+    ].max()
+)
+
+print(
+    "Expected dates:",
+    len(
+        flow_calendar
+    )
+)
+
+print(
+    "Recorded rows:",
+    len(
+        streamflow
+    )
+)
+
+print(
+    "Missing calendar dates:",
+    len(
+        missing_flow_dates
+    )
+)
+
+missing_flow_dates
+```
+
+```{python}
+streamflow[
+    [
+        "STAGE_FT",
+        "FLOW_CFS"
+    ]
+].isna().sum()
+```
+
+### 9.5 Inspect and Preserve the Flags
+
+The CSV header defines:
+
+- `P` as Provisional;
+- `E` as Estimate;
+- `W` as Warning.
+
+This export contains `P` and blank flags.
+
+Blank means no flag was supplied, not proof of final approval.
+
+Provisional measurements are retained in the main analysis.
+
+```{python}
+flow_flags = (
+    streamflow[
+        "FLAG"
+    ]
+    .astype(
+        "string"
+    )
+)
+
+flow_flags = (
+    flow_flags.str.strip()
+)
+
+flow_flags = (
+    flow_flags.fillna("")
+)
+
+unreviewed_flags = (
+    flow_flags.isin(
+        [
+            "",
+            "P"
+        ]
+    )
+    == False
+)
+
+if unreviewed_flags.any():
+
+    raise ValueError(
+        "Review additional flag types before continuing."
+    )
+
+streamflow[
+    "PROVISIONAL_FLAG"
+] = (
+    flow_flags
+    == "P"
+)
+
+flag_labels = (
+    flow_flags.replace(
+        "",
+        "Blank in export"
+    )
+)
+
+flag_labels.value_counts()
+```
+
+### 9.6 Restore the Daily Calendar
+
+Missing dates are added without estimating stage or discharge.
+
+```{python}
+streamflow = (
+    streamflow.set_index(
+        "DATE_LOCAL"
+    )
+)
+
+streamflow = (
+    streamflow.reindex(
+        flow_calendar
+    )
+)
+
+streamflow.index.name = (
+    "DATE_LOCAL"
+)
+
+streamflow = (
+    streamflow.reset_index()
+)
+
+streamflow[
+    "SITE_ID"
+] = streamflow[
+    "SITE_ID"
+].fillna(
+    "58A"
+)
+
+streamflow[
+    "FLOW_ROW_MISSING"
+] = streamflow[
+    "DATE_LOCAL"
+].isin(
+    missing_flow_dates
+)
+
+streamflow[
+    "FLOW_MISSING"
+] = streamflow[
+    "FLOW_CFS"
+].isna()
+
+print(
+    "Calendar rows:",
+    len(
+        streamflow
+    )
+)
+
+print(
+    "Available discharge values:",
+    streamflow[
+        "FLOW_CFS"
+    ].count()
+)
+
+print(
+    "Missing discharge values:",
+    streamflow[
+        "FLOW_MISSING"
+    ].sum()
+)
+
+streamflow[
+    "PROVISIONAL_FLAG"
+].value_counts(
+    dropna=False
+)
+```
+
+### 9.7 Check Coverage by Year
+
+```{python}
+flow_years = (
+    streamflow[
+        "DATE_LOCAL"
+    ].dt.year
+)
+
+flow_groups = (
+    streamflow.groupby(
+        flow_years
+    )
+)
+
+flow_coverage = pd.DataFrame()
+
+flow_coverage[
+    "Expected days"
+] = flow_groups.size()
+
+flow_coverage[
+    "Observed flow days"
+] = flow_groups[
+    "FLOW_CFS"
+].count()
+
+flow_coverage[
+    "Missing flow days"
+] = (
+    flow_coverage[
+        "Expected days"
+    ]
+    - flow_coverage[
+        "Observed flow days"
+    ]
+)
+
+flow_coverage[
+    "Provisional records"
+] = flow_groups[
+    "PROVISIONAL_FLAG"
+].sum()
+
+flow_coverage.index.name = (
+    "Year"
+)
+
+flow_coverage
+```
+
+### 9.8 Inspect Discharge Values
+
+No large flow value is removed merely because of its size.
+
+No flood threshold is defined here.
+
+```{python}
+if (
+    streamflow[
+        "FLOW_CFS"
+    ]
+    < 0
+).any():
+
+    raise ValueError(
+        "Review negative discharge values."
+    )
+
+for column in [
+    "STAGE_FT",
+    "FLOW_CFS"
+]:
+
+    infinite_values = streamflow[
+        column
+    ].isin(
+        [
+            float(
+                "inf"
+            ),
+            float(
+                "-inf"
+            )
+        ]
+    )
+
+    if infinite_values.any():
+
+        raise ValueError(
+            "Review infinite values in "
+            + column
+        )
+
+streamflow[
+    [
+        "STAGE_FT",
+        "FLOW_CFS"
+    ]
+].describe().round(
+    2
+)
+```
+
+```{python}
+largest_flows = (
+    streamflow.sort_values(
+        "FLOW_CFS",
+        ascending=False
+    )
+)
+
+largest_flows[
+    [
+        "DATE_LOCAL",
+        "STAGE_FT",
+        "FLOW_CFS",
+        "FLAG"
+    ]
+].head(
+    5
+)
+```
+
+### 9.9 Save the Calendar-Standardized Record
+
+```{python}
+flow_output_dir = Path(
+    "Data/Processed"
+)
+
+flow_output_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+flow_output_path = (
+    "Data/Processed/"
+    "58A_streamflow_daily_2015_2025.csv"
+)
+
+streamflow.to_csv(
+    flow_output_path,
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep="",
+    encoding="utf-8"
+)
+
+print(
+    "Saved:",
+    flow_output_path
+)
+
+print(
+    "Rows:",
+    len(
+        streamflow
+    )
+)
+
+print(
+    "Columns:",
+    streamflow.shape[1]
+)
+```
+
+### 9.10 Flow Data Findings
+
+The long export contains 3,974 records.
+
+The requested calendar has 4,018 days, so 44 dates are absent.
+
+The gaps are:
+
+- December 22–25, 2021: 4 days;
+- January 14–30, 2022: 17 days;
+- July 8–30, 2023: 23 days.
+
+All existing rows contain stage and discharge values.
+
+There are 753 provisional records and 3,221 records with blank flags.
+
+The largest exported daily discharge is 68.15 cfs on December 5, 2023;
+that record is provisional.
+
+After calendar standardization, there are 4,018 rows and 44 missing
+stage and discharge values.
+
+## Part 10 — Data Alignment and Matched-Sample Audit
+
+### 10.1 Pairing Definition and Limitations
+
+Prepare a candidate pairing between Sand Point rainfall history and
+site 58A discharge.
+
+The response for date $t$ is reported daily mean flow.
+
+Candidate rainfall inputs are the 1-, 3-, and 7-day rainfall histories
+ending on date $t-1$.
+
+Matching date labels does not establish identical daily observation
+intervals or catchment-wide rainfall representativeness.
+
+### 10.2 Review Rainfall Observation-Time Labels
+
+The fourth NOAA precipitation attribute field is the observation time when
+supplied.[^noaa-flags]
+
+A value of `2400` is not a data-publication timestamp.
+
+```{python}
+rain_attributes = (
+    weather_clean[
+        "PRCP_ATTRIBUTES"
+    ]
+    .astype(
+        "string"
+    )
+)
+
+rain_parts = (
+    rain_attributes.str.split(
+        ","
+    )
+)
+
+rain_observation_time = (
+    rain_parts.str[3]
+)
+
+rain_observation_time.value_counts(
+    dropna=False
+)
+```
+
+### 10.3 Prepare the Rainfall Table
+
+```{python}
+rainfall_match = (
+    features.copy()
+)
+
+rainfall_match = (
+    rainfall_match.rename(
+        columns={
+            "STATION":
+                "WEATHER_STATION"
+        }
+    )
+)
+
+rainfall_match.head()
+```
+
+### 10.4 Prepare the Flow Table
+
+Same-day stage is not included as an advance predictor.
+
+```{python}
+flow_columns = [
+    "DATE_LOCAL",
+    "SITE_ID",
+    "FLOW_CFS",
+    "FLAG",
+    "PROVISIONAL_FLAG",
+    "FLOW_ROW_MISSING",
+    "FLOW_MISSING"
+]
+
+flow_match = (
+    streamflow[
+        flow_columns
+    ].copy()
+)
+
+flow_match = (
+    flow_match.rename(
+        columns={
+            "SITE_ID":
+                "FLOW_SITE_ID",
+
+            "FLAG":
+                "FLOW_FLAG"
+        }
+    )
+)
+
+flow_match.head()
+```
+
+### 10.5 Pair Records by Reported Date Labels
+
+The outer join preserves all date labels, while `validate="one_to_one"`
+requires each date key to appear at most once in each input table.[^pandas-merge]
+
+```{python}
+paired = pd.merge(
+    rainfall_match,
+    flow_match,
+    left_on="DATE",
+    right_on="DATE_LOCAL",
+    how="outer",
+    validate="one_to_one"
+)
+
+paired = paired.sort_values(
+    "DATE"
+)
+
+paired = paired.reset_index(
+    drop=True
+)
+
+print(
+    "Calendar rows in the candidate pairing:",
+    len(
+        paired
+    )
+)
+
+paired.head()
+```
+
+### 10.6 Count Complete Candidate Pairs
+
+`PAIR_COMPLETE` means all three rainfall features and the flow response are
+available.
+
+It is not a quality-approval flag.
+
+```{python}
+predictor_columns = [
+    "RAIN_PREV_1D_MM",
+    "RAIN_PREV_3D_MM",
+    "RAIN_PREV_7D_MM"
+]
+
+paired[
+    "HAS_RAIN_HISTORY"
+] = paired[
+    predictor_columns
+].notna().all(
+    axis=1
+)
+
+paired[
+    "HAS_FLOW"
+] = paired[
+    "FLOW_CFS"
+].notna()
+
+paired[
+    "PAIR_COMPLETE"
+] = (
+    paired[
+        "HAS_RAIN_HISTORY"
+    ]
+    & paired[
+        "HAS_FLOW"
+    ]
+)
+
+print(
+    "Complete rainfall histories:",
+    paired[
+        "HAS_RAIN_HISTORY"
+    ].sum()
+)
+
+print(
+    "Available flow values:",
+    paired[
+        "HAS_FLOW"
+    ].sum()
+)
+
+print(
+    "Complete candidate pairs:",
+    paired[
+        "PAIR_COMPLETE"
+    ].sum()
+)
+
+pd.crosstab(
+    paired[
+        "HAS_RAIN_HISTORY"
+    ],
+    paired[
+        "HAS_FLOW"
+    ]
+)
+```
+
+### 10.7 Preserve Provisional Status
+
+```{python}
+complete_pairs = (
+    paired[
+        "PAIR_COMPLETE"
+    ]
+)
+
+paired_status = (
+    paired.loc[
+        complete_pairs,
+        "PROVISIONAL_FLAG"
+    ]
+)
+
+paired_status.value_counts(
+    dropna=False
+)
+```
+
+### 10.8 Save the Audit Table
+
+```{python}
+Path(
+    "Data/Processed"
+).mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+paired_path = (
+    "Data/Processed/"
+    "sand_point_58A_candidate_pairs_2015_2025.csv"
+)
+
+paired.to_csv(
+    paired_path,
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep="",
+    encoding="utf-8"
+)
+
+print(
+    "Saved:",
+    paired_path
+)
+```
+
+### 10.9 Alignment Assumptions
+
+The pairing does not establish that Sand Point rainfall represents the
+entire upstream catchment or that the rainfall and flow products use
+identical daily intervals.
+
+Where exact historical availability cannot be reconstructed, the project
+is interpreted as a retrospective experiment under the stated timing
+assumption rather than as a verified operational forecast.
+
+# Statistical Models
+
+## Part 11 — Prediction Design and Baseline Models
+
+### 11.1 Define the Experiment
+
+The response is daily mean discharge at site 58A in cfs.
+
+The rainfall models use only:
+
+- `RAIN_PREV_1D_MM`;
+- `RAIN_PREV_3D_MM`;
+- `RAIN_PREV_7D_MM`.
+
+Same-day precipitation and same-day stage are not predictors.
+
+The experiment assumes observations labeled with date $t-1$ are available
+before predicting flow labeled date $t$.
+
+### 11.2 Fix the Training, Validation, and Test Periods
+
+| Dataset | Dates | Role |
+|---|---|---|
+| Training | 2015-01-01 to 2021-12-31 | Estimate model parameters |
+| Validation | 2022-01-01 to 2023-12-31 | Compare candidate methods |
+| Test | 2024-01-01 to 2025-12-31 | Final evaluation |
+
+Dates are not randomly shuffled.
+
+All fitted preprocessing quantities must be estimated from the training
+period during model development.[^time-design]
+
+Earlier descriptive analysis included the full period.
+
+Therefore the test period is not completely unseen in every descriptive
+sense, but its prediction errors are excluded from model selection.
+
+### 11.3 Prepare the Daily Experiment Table
+
+Previous-day flow is created before removing incomplete rows.
+
+```{python}
+model_calendar = (
+    paired.copy()
+)
+
+model_calendar = (
+    model_calendar.sort_values(
+        "DATE"
+    )
+)
+
+model_calendar = (
+    model_calendar.reset_index(
+        drop=True
+    )
+)
+
+expected_dates = pd.Series(
+    full_date_range
+)
+
+if not model_calendar[
+    "DATE"
+].equals(
+    expected_dates
+):
+
+    raise ValueError(
+        "Restore the full daily calendar before computing flow lags."
+    )
+
+model_calendar[
+    "FLOW_PREV_1D_CFS"
+] = model_calendar[
+    "FLOW_CFS"
+].shift(
+    1
+)
+
+model_calendar[
+    "FLOW_PREV_1D_PROVISIONAL"
+] = model_calendar[
+    "PROVISIONAL_FLAG"
+].shift(
+    1
+)
+
+model_calendar[
+    "MONTH"
+] = model_calendar[
+    "DATE"
+].dt.month
+```
+
+### 11.4 Define a Common Comparison Sample
+
+Every method is initially evaluated on dates where:
+
+- all three rainfall histories are available;
+- current flow is available;
+- previous-day flow is available.
+
+```{python}
+rain_predictors = [
+    "RAIN_PREV_1D_MM",
+    "RAIN_PREV_3D_MM",
+    "RAIN_PREV_7D_MM"
+]
+
+required_values = (
+    rain_predictors
+    + [
+        "FLOW_CFS",
+        "FLOW_PREV_1D_CFS"
+    ]
+)
+
+model_calendar[
+    "COMPARISON_COMPLETE"
+] = model_calendar[
+    required_values
+].notna().all(
+    axis=1
+)
+
+print(
+    "Complete rainfall-flow pairs:",
+    model_calendar[
+        "PAIR_COMPLETE"
+    ].sum()
+)
+
+print(
+    "Common comparison rows:",
+    model_calendar[
+        "COMPARISON_COMPLETE"
+    ].sum()
+)
+```
+
+### 11.5 Assign Periods and Audit Coverage
+
+```{python}
+model_calendar[
+    "SPLIT"
+] = "Unassigned"
+
+train_dates = (
+    model_calendar[
+        "DATE"
+    ].between(
+        "2015-01-01",
+        "2021-12-31"
+    )
+)
+
+validation_dates = (
+    model_calendar[
+        "DATE"
+    ].between(
+        "2022-01-01",
+        "2023-12-31"
+    )
+)
+
+test_dates = (
+    model_calendar[
+        "DATE"
+    ].between(
+        "2024-01-01",
+        "2025-12-31"
+    )
+)
+
+model_calendar.loc[
+    train_dates,
+    "SPLIT"
+] = "Train"
+
+model_calendar.loc[
+    validation_dates,
+    "SPLIT"
+] = "Validation"
+
+model_calendar.loc[
+    test_dates,
+    "SPLIT"
+] = "Test"
+
+if (
+    model_calendar[
+        "SPLIT"
+    ]
+    == "Unassigned"
+).any():
+
+    raise ValueError(
+        "Assign every date to an evaluation period."
+    )
+
+split_names = [
+    "Train",
+    "Validation",
+    "Test"
+]
+
+summary_columns = [
+    "Calendar days",
+    "Rain-flow pairs",
+    "Common sample",
+    "Provisional targets"
+]
+
+split_summary = pd.DataFrame(
+    index=split_names,
+    columns=summary_columns
+)
+
+for split_name in split_names:
+
+    period_rows = (
+        model_calendar[
+            "SPLIT"
+        ]
+        == split_name
+    )
+
+    period = (
+        model_calendar.loc[
+            period_rows
+        ]
+    )
+
+    eligible = (
+        period.loc[
+            period[
+                "COMPARISON_COMPLETE"
+            ]
+        ]
+    )
+
+    split_summary.loc[
+        split_name,
+        "Calendar days"
+    ] = len(
+        period
+    )
+
+    split_summary.loc[
+        split_name,
+        "Rain-flow pairs"
+    ] = period[
+        "PAIR_COMPLETE"
+    ].sum()
+
+    split_summary.loc[
+        split_name,
+        "Common sample"
+    ] = len(
+        eligible
+    )
+
+    split_summary.loc[
+        split_name,
+        "Provisional targets"
+    ] = eligible[
+        "PROVISIONAL_FLAG"
+    ].sum()
+
+split_summary = (
+    split_summary.astype(
+        int
+    )
+)
+
+split_summary
+```
+
+### 11.6 Create the Three Data Subsets
+
+```{python}
+comparison_data = (
+    model_calendar.loc[
+        model_calendar[
+            "COMPARISON_COMPLETE"
+        ]
+    ].copy()
+)
+
+train = (
+    comparison_data.loc[
+        comparison_data[
+            "SPLIT"
+        ]
+        == "Train"
+    ].copy()
+)
+
+validation = (
+    comparison_data.loc[
+        comparison_data[
+            "SPLIT"
+        ]
+        == "Validation"
+    ].copy()
+)
+
+test = (
+    comparison_data.loc[
+        comparison_data[
+            "SPLIT"
+        ]
+        == "Test"
+    ].copy()
+)
+
+if (
+    train.empty
+    or validation.empty
+    or test.empty
+):
+
+    raise ValueError(
+        "An evaluation subset has no usable observations."
+    )
+
+print(
+    "Training rows:",
+    len(
+        train
+    )
+)
+
+print(
+    "Validation rows:",
+    len(
+        validation
+    )
+)
+
+print(
+    "Reserved test rows:",
+    len(
+        test
+    )
+)
+```
+
+### 11.7 Baseline 1: Training Mean
+
+The first benchmark predicts the training-sample mean for every validation
+date.[^simple-baselines]
+
+$$
+\widehat Q_t^{\mathrm{mean}}
+=
+\overline Q_{\mathrm{train}}
+$$
+
+```{python}
+training_mean = (
+    train[
+        "FLOW_CFS"
+    ].mean()
+)
+
+validation_predictions = (
+    validation.copy()
+)
+
+validation_predictions[
+    "PRED_MEAN_CFS"
+] = training_mean
+
+print(
+    "Training mean discharge (cfs):",
+    round(
+        training_mean,
+        3
+    )
+)
+```
+
+### 11.8 Baseline 2: Training Calendar-Month Mean
+
+The second benchmark uses the training-sample mean daily flow for the
+calendar month being predicted.[^simple-baselines]
+
+```{python}
+training_month_means = (
+    train.groupby(
+        "MONTH"
+    )[
+        "FLOW_CFS"
+    ].mean()
+)
+
+if len(
+    training_month_means
+) != 12:
+
+    raise ValueError(
+        "The monthly baseline needs training observations in every month."
+    )
+
+validation_predictions[
+    "PRED_MONTH_MEAN_CFS"
+] = float(
+    "nan"
+)
+
+for month in range(
+    1,
+    13
+):
+
+    month_rows = (
+        validation_predictions[
+            "MONTH"
+        ]
+        == month
+    )
+
+    month_mean = (
+        training_month_means.loc[
+            month
+        ]
+    )
+
+    validation_predictions.loc[
+        month_rows,
+        "PRED_MONTH_MEAN_CFS"
+    ] = month_mean
+```
+
+### 11.9 Baseline 3: Previous-Day Flow
+
+The persistence benchmark predicts the previous day's reported
+flow.[^simple-baselines]
+
+$$
+\widehat Q_t^{\mathrm{persistence}}
+=
+Q_{t-1}
+$$
+
+```{python}
+validation_predictions[
+    "PRED_PERSISTENCE_CFS"
+] = validation_predictions[
+    "FLOW_PREV_1D_CFS"
+]
+```
+
+Persistence uses recent streamflow rather than rainfall.
+
+Therefore its comparison with rainfall-only models does not isolate the
+incremental value of rainfall after streamflow history is already known.
+
+### 11.10 Evaluate the Validation Period
+
+MAE is the primary overall error measure.
+
+RMSE is also reported because it gives larger errors more influence.[^baseline-errors]
+
+$$
+\mathrm{MAE}
+=
+\frac{1}{n}
+\sum_{i=1}^{n}
+\left|
+Q_i-\widehat Q_i
+\right|
+$$
+
+$$
+\mathrm{RMSE}
+=
+\sqrt{
+\frac{1}{n}
+\sum_{i=1}^{n}
+\left(
+Q_i-\widehat Q_i
+\right)^2
+}
+$$
+
+```{python}
+baseline_columns = {
+    "Training mean":
+        "PRED_MEAN_CFS",
+
+    "Calendar-month mean":
+        "PRED_MONTH_MEAN_CFS",
+
+    "Previous-day flow":
+        "PRED_PERSISTENCE_CFS"
+}
+
+baseline_results = pd.DataFrame(
+    index=list(
+        baseline_columns
+    )
+)
+
+baseline_results[
+    "Validation days"
+] = len(
+    validation_predictions
+)
+
+for baseline_name in baseline_columns:
+
+    prediction_column = (
+        baseline_columns[
+            baseline_name
+        ]
+    )
+
+    predicted = (
+        validation_predictions[
+            prediction_column
+        ]
+    )
+
+    if predicted.isna().any():
+
+        raise ValueError(
+            "A baseline prediction is missing."
+        )
+
+    errors = (
+        validation_predictions[
+            "FLOW_CFS"
+        ]
+        - predicted
+    )
+
+    absolute_errors = (
+        errors.abs()
+    )
+
+    squared_errors = (
+        errors ** 2
+    )
+
+    baseline_results.loc[
+        baseline_name,
+        "MAE_cfs"
+    ] = absolute_errors.mean()
+
+    baseline_results.loc[
+        baseline_name,
+        "RMSE_cfs"
+    ] = (
+        squared_errors.mean()
+        ** 0.5
+    )
+
+baseline_results.round(
+    3
+)
+```
+
+### 11.11 Save the Experiment Design
+
+```{python}
+Path(
+    "Data/Processed"
+).mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+design_path = (
+    "Data/Processed/"
+    "sand_point_58A_experiment_design_2015_2025.csv"
+)
+
+model_calendar.to_csv(
+    design_path,
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep="",
+    encoding="utf-8"
+)
+
+print(
+    "Saved:",
+    design_path
+)
+```
+
+### 11.12 Baseline Findings
+
+On the 2022–2023 validation sample:
+
+- the training mean has MAE about 4.603 cfs;
+- the calendar-month mean has MAE about 3.673 cfs;
+- previous-day flow has MAE about 2.557 cfs.
+
+Persistence is therefore a strong benchmark for this prediction task.
+
+## Part 12 — Linear Regression and Diagnostics
+
+### 12.1 Model Specification
+
+Model 1 uses previous-day rainfall:
+
+$$
+Q_t
+=
+a_0
++
+a_1R_{1,t}
++
+\varepsilon_t.
+$$
+
+Model 2 uses three rainfall-history totals:
+
+$$
+Q_t
+=
+b_0
++
+b_1R_{1,t}
++
+b_3R_{3,t}
++
+b_7R_{7,t}
++
+\varepsilon_t.
+$$
+
+These are statistical prediction models rather than physical runoff
+equations.
+
+### 12.2 Ordinary Least Squares
+
+OLS chooses coefficients that minimize the sum of squared training
+residuals.[^ols-estimation]
+
+The statsmodels OLS interface does not automatically add an intercept, so
+we add the constant column explicitly.[^statsmodels-ols]
+
+```{python}
+import statsmodels.api as sm
+
+X_train = (
+    train[
+        rain_predictors
+    ].copy()
+)
+
+y_train = (
+    train[
+        "FLOW_CFS"
+    ].copy()
+)
+
+X_validation = (
+    validation[
+        rain_predictors
+    ].copy()
+)
+
+y_validation = (
+    validation[
+        "FLOW_CFS"
+    ].copy()
+)
+
+print(
+    "Training rows:",
+    len(
+        X_train
+    )
+)
+
+print(
+    "Validation rows:",
+    len(
+        X_validation
+    )
+)
+```
+
+### 12.3 Inspect Predictor Correlations
+
+The rainfall windows overlap.
+
+```{python}
+predictor_correlations = (
+    X_train.corr()
+)
+
+predictor_correlations.round(
+    3
+)
+```
+
+### 12.4 Fit Model 1
+
+```{python}
+X_train_simple = (
+    X_train[
+        [
+            "RAIN_PREV_1D_MM"
+        ]
+    ].copy()
+)
+
+X_validation_simple = (
+    X_validation[
+        [
+            "RAIN_PREV_1D_MM"
+        ]
+    ].copy()
+)
+
+X_train_simple = sm.add_constant(
+    X_train_simple,
+    has_constant="add"
+)
+
+X_validation_simple = sm.add_constant(
+    X_validation_simple,
+    has_constant="add"
+)
+
+simple_model = sm.OLS(
+    y_train,
+    X_train_simple,
+    missing="raise"
+)
+
+simple_fit = (
+    simple_model.fit()
+)
+
+simple_coefficients = (
+    simple_fit.params.to_frame(
+        name="Estimate"
+    )
+)
+
+simple_coefficients
+```
+
+### 12.5 Fit Model 2
+
+```{python}
+X_train_multiple = sm.add_constant(
+    X_train,
+    has_constant="add"
+)
+
+X_validation_multiple = sm.add_constant(
+    X_validation,
+    has_constant="add"
+)
+
+multiple_model = sm.OLS(
+    y_train,
+    X_train_multiple,
+    missing="raise"
+)
+
+multiple_fit = (
+    multiple_model.fit()
+)
+
+multiple_coefficients = (
+    multiple_fit.params.to_frame(
+        name="Estimate"
+    )
+)
+
+multiple_coefficients
+```
+
+### 12.6 Interpret the Overlapping Rainfall Windows
+
+A multiple-regression coefficient describes a change while other included
+predictors are held fixed.[^linear-model]
+
+Because the cumulative windows overlap, adding one mm of rainfall yesterday
+changes all three totals.
+
+```{python}
+b1 = multiple_fit.params[
+    "RAIN_PREV_1D_MM"
+]
+
+b3 = multiple_fit.params[
+    "RAIN_PREV_3D_MM"
+]
+
+b7 = multiple_fit.params[
+    "RAIN_PREV_7D_MM"
+]
+
+lag_weights = pd.DataFrame(
+    index=[
+        "1 day earlier",
+        "One day at lag 2 or 3",
+        "One day at lag 4, 5, 6, or 7"
+    ]
+)
+
+lag_weights[
+    "Predicted change: cfs per mm"
+] = [
+    b1 + b3 + b7,
+    b3 + b7,
+    b7
+]
+
+lag_weights.round(
+    4
+)
+```
+
+These values are fitted statistical associations, not causal runoff
+coefficients.
+
+### 12.7 Inspect Training Fit
+
+```{python}
+training_fit = pd.DataFrame(
+    index=[
+        "One-day rainfall OLS",
+        "Three-window rainfall OLS"
+    ]
+)
+
+training_fit[
+    "Training days"
+] = len(
+    train
+)
+
+training_fit[
+    "Training R2"
+] = [
+    simple_fit.rsquared,
+    multiple_fit.rsquared
+]
+
+training_fit.round(
+    3
+)
+```
+
+### 12.8 Predict the Validation Period
+
+```{python}
+if not validation_predictions[
+    "DATE"
+].equals(
+    validation[
+        "DATE"
+    ]
+):
+
+    raise ValueError(
+        "Compare models on the same validation dates."
+    )
+
+regression_validation = (
+    validation_predictions.copy()
+)
+
+regression_validation[
+    "PRED_SIMPLE_OLS_CFS"
+] = simple_fit.predict(
+    X_validation_simple
+)
+
+regression_validation[
+    "PRED_MULTIPLE_OLS_CFS"
+] = multiple_fit.predict(
+    X_validation_multiple
+)
+
+ols_prediction_columns = [
+    "PRED_SIMPLE_OLS_CFS",
+    "PRED_MULTIPLE_OLS_CFS"
+]
+
+if regression_validation[
+    ols_prediction_columns
+].isna().any().any():
+
+    raise ValueError(
+        "A regression prediction is missing."
+    )
+
+negative_predictions = (
+    regression_validation[
+        ols_prediction_columns
+    ]
+    < 0
+).sum()
+
+negative_predictions
+```
+
+### 12.9 Compare Validation Errors
+
+```{python}
+regression_columns = {
+    "One-day rainfall OLS":
+        "PRED_SIMPLE_OLS_CFS",
+
+    "Three-window rainfall OLS":
+        "PRED_MULTIPLE_OLS_CFS"
+}
+
+validation_comparison = (
+    baseline_results.copy()
+)
+
+for model_name in regression_columns:
+
+    prediction_column = (
+        regression_columns[
+            model_name
+        ]
+    )
+
+    predicted = (
+        regression_validation[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        y_validation
+        - predicted
+    )
+
+    validation_comparison.loc[
+        model_name,
+        "Validation days"
+    ] = len(
+        y_validation
+    )
+
+    validation_comparison.loc[
+        model_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    validation_comparison.loc[
+        model_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+validation_comparison[
+    "Validation days"
+] = (
+    validation_comparison[
+        "Validation days"
+    ].astype(
+        int
+    )
+)
+
+validation_comparison.round(
+    3
+)
+```
+
+### 12.10 Observed versus Predicted Flow
+
+```{python}
+#| label: fig-ols-validation
+#| fig-cap: "Three-window rainfall OLS on the validation sample. The dashed line represents exact predictions."
+#| fig-align: center
+
+observed_flow = (
+    regression_validation[
+        "FLOW_CFS"
+    ]
+)
+
+predicted_flow = (
+    regression_validation[
+        "PRED_MULTIPLE_OLS_CFS"
+    ]
+)
+
+plot_lower = min(
+    0,
+    observed_flow.min(),
+    predicted_flow.min()
+)
+
+plot_upper = max(
+    observed_flow.max(),
+    predicted_flow.max()
+) * 1.05
+
+plt.figure(
+    figsize=(
+        6,
+        6
+    )
+)
+
+plt.scatter(
+    observed_flow,
+    predicted_flow,
+    s=18,
+    alpha=0.45
+)
+
+plt.plot(
+    [
+        plot_lower,
+        plot_upper
+    ],
+    [
+        plot_lower,
+        plot_upper
+    ],
+    "--",
+    label="Exact prediction"
+)
+
+plt.xlim(
+    plot_lower,
+    plot_upper
+)
+
+plt.ylim(
+    plot_lower,
+    plot_upper
+)
+
+plt.title(
+    "Observed versus Predicted Flow: Validation"
+)
+
+plt.xlabel(
+    "Observed daily flow (cfs)"
+)
+
+plt.ylabel(
+    "Predicted daily flow (cfs)"
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 12.11 Training Residuals versus Fitted Values
+
+Residuals are observed minus fitted flow.
+
+```{python}
+training_diagnostics = (
+    train[
+        [
+            "DATE",
+            "FLOW_CFS"
+        ]
+    ].copy()
+)
+
+training_diagnostics[
+    "FITTED_CFS"
+] = multiple_fit.fittedvalues
+
+training_diagnostics[
+    "RESIDUAL_CFS"
+] = (
+    training_diagnostics[
+        "FLOW_CFS"
+    ]
+    - training_diagnostics[
+        "FITTED_CFS"
+    ]
+)
+
+print(
+    "Mean training residual (cfs):",
+    round(
+        training_diagnostics[
+            "RESIDUAL_CFS"
+        ].mean(),
+        6
+    )
+)
+```
+
+```{python}
+#| label: fig-ols-training-residuals
+#| fig-cap: "Training residuals from the three-window rainfall OLS model."
+#| fig-align: center
+
+plt.figure(
+    figsize=(
+        8,
+        4
+    )
+)
+
+plt.scatter(
+    training_diagnostics[
+        "FITTED_CFS"
+    ],
+    training_diagnostics[
+        "RESIDUAL_CFS"
+    ],
+    s=14,
+    alpha=0.35
+)
+
+plt.axhline(
+    0,
+    linestyle="--"
+)
+
+plt.title(
+    "Training Residuals versus Fitted Flow"
+)
+
+plt.xlabel(
+    "Fitted daily flow (cfs)"
+)
+
+plt.ylabel(
+    "Observed minus fitted flow (cfs)"
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 12.12 Calendar-Day Residual Correlations
+
+```{python}
+training_calendar = pd.date_range(
+    "2015-01-01",
+    "2021-12-31",
+    freq="D"
+)
+
+residual_calendar = (
+    training_diagnostics.set_index(
+        "DATE"
+    )
+)
+
+residual_calendar = (
+    residual_calendar.reindex(
+        training_calendar
+    )
+)
+
+current_residual = (
+    residual_calendar[
+        "RESIDUAL_CFS"
+    ]
+)
+
+residual_lags = pd.DataFrame(
+    index=[
+        1,
+        3,
+        7
+    ]
+)
+
+residual_lags.index.name = (
+    "Calendar lag (days)"
+)
+
+for lag in [
+    1,
+    3,
+    7
+]:
+
+    earlier_residual = (
+        current_residual.shift(
+            lag
+        )
+    )
+
+    available_pairs = (
+        current_residual.notna()
+        & earlier_residual.notna()
+    )
+
+    current_values = (
+        current_residual.loc[
+            available_pairs
+        ]
+    )
+
+    earlier_values = (
+        earlier_residual.loc[
+            available_pairs
+        ]
+    )
+
+    residual_lags.loc[
+        lag,
+        "Available pairs"
+    ] = available_pairs.sum()
+
+    residual_lags.loc[
+        lag,
+        "Correlation"
+    ] = current_values.corr(
+        earlier_values
+    )
+
+residual_lags[
+    "Available pairs"
+] = residual_lags[
+    "Available pairs"
+].astype(
+    int
+)
+
+residual_lags.round(
+    3
+)
+```
+
+These correlations are descriptive diagnostics, not significance tests or
+proof of independent errors.[^regression-diagnostics]
+
+### 12.13 Save the Regression Results
+
+```{python}
+results_dir = Path(
+    "Results/Tables"
+)
+
+results_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+multiple_coefficients.to_csv(
+    results_dir
+    / "12_multiple_ols_coefficients.csv",
+    index_label="Term"
+)
+
+validation_comparison.to_csv(
+    results_dir
+    / "12_validation_model_comparison.csv",
+    index_label="Model"
+)
+
+regression_validation.to_csv(
+    results_dir
+    / "12_validation_predictions.csv",
+    index=False,
+    date_format="%Y-%m-%d"
+)
+
+print(
+    "Saved regression results in:",
+    results_dir
+)
+```
+
+### 12.14 Findings and Interpretation
+
+Training R-squared rises from about 0.335 for the one-day model to about
+0.481 for the three-window model.
+
+The three-window model also improves validation MAE and RMSE relative to
+the one-day rainfall model and both mean baselines.
+
+Three-window OLS validation MAE is approximately 2.865 cfs.
+
+Persistence has lower MAE at approximately 2.557 cfs, while three-window
+OLS has lower RMSE than persistence.
+
+The one-day training residual correlation is approximately 0.452, indicating
+noticeable remaining temporal dependence.
+
+## Part 13 — Regularization and Tree-Based Model Comparison
+
+### 13.1 Purpose and Comparison Rules
+
+We add three rainfall-only candidates:
+
+- ridge regression;
+- regression tree;
+- random forest.
+
+All use the same three rainfall-history predictors, training dates, and
+validation dates as the multiple OLS model.
+
+| Candidate | Fixed settings |
+|---|---|
+| Ridge | Standardized rainfall features; alpha = 10 |
+| Regression tree | Maximum depth = 4; minimum leaf size = 20 |
+| Random forest | 300 trees; maximum depth = 6; minimum leaf size = 10; two candidate features per split |
+
+These configurations are fixed comparison choices, not an exhaustive
+hyperparameter search.
+
+### 13.2 Prepare Model Inputs
+
+```{python}
+import sklearn
+
+from sklearn.linear_model import Ridge
+
+from sklearn.tree import (
+    DecisionTreeRegressor,
+    export_text
+)
+
+from sklearn.ensemble import (
+    RandomForestRegressor
+)
+
+X_train_ml = (
+    train[
+        rain_predictors
+    ].copy()
+)
+
+X_validation_ml = (
+    validation[
+        rain_predictors
+    ].copy()
+)
+
+y_train_ml = (
+    train[
+        "FLOW_CFS"
+    ].copy()
+)
+
+y_validation_ml = (
+    validation[
+        "FLOW_CFS"
+    ].copy()
+)
+
+if not regression_validation[
+    "DATE"
+].equals(
+    validation[
+        "DATE"
+    ]
+):
+
+    raise ValueError(
+        "Keep the same validation dates for every model."
+    )
+
+print(
+    "scikit-learn version:",
+    sklearn.__version__
+)
+
+print(
+    "Training rows:",
+    len(
+        X_train_ml
+    )
+)
+
+print(
+    "Validation rows:",
+    len(
+        X_validation_ml
+    )
+)
+```
+
+### 13.3 Standardize Rainfall Features for Ridge
+
+Training means and standard deviations are reused for validation.[^ml-scaling]
+
+```{python}
+rain_training_means = (
+    X_train_ml.mean()
+)
+
+rain_training_scales = (
+    X_train_ml.std(
+        ddof=0
+    )
+)
+
+if (
+    rain_training_scales
+    == 0
+).any():
+
+    raise ValueError(
+        "Review a rainfall predictor with no training variation."
+    )
+
+X_train_scaled = (
+    X_train_ml
+    - rain_training_means
+) / rain_training_scales
+
+X_validation_scaled = (
+    X_validation_ml
+    - rain_training_means
+) / rain_training_scales
+
+scaling_table = pd.DataFrame(
+    index=rain_predictors
+)
+
+scaling_table[
+    "Training mean (mm)"
+] = rain_training_means
+
+scaling_table[
+    "Training standard deviation (mm)"
+] = rain_training_scales
+
+scaling_table.round(
+    3
+)
+```
+
+### 13.4 Fit Ridge Regression
+
+Ridge regression adds a squared-coefficient penalty to the least-squares
+objective.[^ml-ridge]
+
+```{python}
+ridge_model = Ridge(
+    alpha=10.0,
+    fit_intercept=True,
+    solver="svd"
+)
+
+ridge_model.fit(
+    X_train_scaled,
+    y_train_ml
+)
+
+ml_validation = (
+    regression_validation.copy()
+)
+
+ml_validation[
+    "PRED_RIDGE_CFS"
+] = ridge_model.predict(
+    X_validation_scaled
+)
+```
+
+### 13.5 Compare Ridge and OLS Coefficients in Original Units
+
+```{python}
+ridge_original_slopes = pd.Series(
+    ridge_model.coef_,
+    index=rain_predictors
+)
+
+ridge_original_slopes = (
+    ridge_original_slopes
+    / rain_training_scales
+)
+
+ridge_original_intercept = (
+    ridge_model.intercept_
+    - (
+        ridge_original_slopes
+        * rain_training_means
+    ).sum()
+)
+
+slope_comparison = pd.DataFrame(
+    index=rain_predictors
+)
+
+slope_comparison[
+    "OLS: cfs per mm"
+] = multiple_fit.params.loc[
+    rain_predictors
+]
+
+slope_comparison[
+    "Ridge: cfs per mm"
+] = ridge_original_slopes
+
+print(
+    "Ridge intercept in original units (cfs):",
+    round(
+        ridge_original_intercept,
+        4
+    )
+)
+
+slope_comparison.round(
+    4
+)
+```
+
+### 13.6 Fit a Regression Tree
+
+The regression tree recursively partitions the rainfall-feature space and
+predicts using training responses within terminal leaves.[^ml-tree]
+
+```{python}
+tree_model = DecisionTreeRegressor(
+    criterion="squared_error",
+    max_depth=4,
+    min_samples_leaf=20,
+    random_state=42
+)
+
+tree_model.fit(
+    X_train_ml,
+    y_train_ml
+)
+
+ml_validation[
+    "PRED_TREE_CFS"
+] = tree_model.predict(
+    X_validation_ml
+)
+
+print(
+    "Fitted tree depth:",
+    tree_model.get_depth()
+)
+
+print(
+    "Number of leaves:",
+    tree_model.get_n_leaves()
+)
+```
+
+### 13.7 Inspect the Upper Tree Rules
+
+The printed thresholds are statistical splits, not flood thresholds.
+
+`export_text` is used only to display a readable subset of the fitted tree
+rules; it does not modify the fitted estimator.[^ml-tree-text]
+
+```{python}
+tree_rules = export_text(
+    tree_model,
+    feature_names=rain_predictors,
+    max_depth=2,
+    decimals=2
+)
+
+print(
+    tree_rules
+)
+```
+
+### 13.8 Fit a Random Forest
+
+The random forest averages predictions across regression trees fitted to
+bootstrap samples of the training data.[^ml-forest]
+
+```{python}
+forest_model = RandomForestRegressor(
+    n_estimators=300,
+    criterion="squared_error",
+    max_depth=6,
+    min_samples_leaf=10,
+    max_features=2,
+    bootstrap=True,
+    oob_score=False,
+    random_state=42,
+    n_jobs=1
+)
+
+forest_model.fit(
+    X_train_ml,
+    y_train_ml
+)
+
+ml_validation[
+    "PRED_FOREST_CFS"
+] = forest_model.predict(
+    X_validation_ml
+)
+```
+
+### 13.9 Compare All Validation Scores
+
+```{python}
+ml_columns = {
+    "Ridge rainfall":
+        "PRED_RIDGE_CFS",
+
+    "Regression tree rainfall":
+        "PRED_TREE_CFS",
+
+    "Random forest rainfall":
+        "PRED_FOREST_CFS"
+}
+
+all_validation_results = (
+    validation_comparison.copy()
+)
+
+for model_name in ml_columns:
+
+    prediction_column = (
+        ml_columns[
+            model_name
+        ]
+    )
+
+    predicted = (
+        ml_validation[
+            prediction_column
+        ]
+    )
+
+    if predicted.isna().any():
+
+        raise ValueError(
+            "A candidate prediction is missing."
+        )
+
+    errors = (
+        y_validation_ml
+        - predicted
+    )
+
+    all_validation_results.loc[
+        model_name,
+        "Validation days"
+    ] = len(
+        y_validation_ml
+    )
+
+    all_validation_results.loc[
+        model_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    all_validation_results.loc[
+        model_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+all_validation_results[
+    "Validation days"
+] = (
+    all_validation_results[
+        "Validation days"
+    ].astype(
+        int
+    )
+)
+
+all_validation_results.round(
+    3
+)
+```
+
+### 13.10 Compare Training and Validation Error
+
+```{python}
+training_predictions = pd.DataFrame(
+    index=train.index
+)
+
+training_predictions[
+    "Three-window rainfall OLS"
+] = multiple_fit.fittedvalues
+
+training_predictions[
+    "Ridge rainfall"
+] = ridge_model.predict(
+    X_train_scaled
+)
+
+training_predictions[
+    "Regression tree rainfall"
+] = tree_model.predict(
+    X_train_ml
+)
+
+training_predictions[
+    "Random forest rainfall"
+] = forest_model.predict(
+    X_train_ml
+)
+
+fit_comparison = pd.DataFrame(
+    index=training_predictions.columns
+)
+
+for model_name in training_predictions.columns:
+
+    training_errors = (
+        y_train_ml
+        - training_predictions[
+            model_name
+        ]
+    )
+
+    fit_comparison.loc[
+        model_name,
+        "Training MAE"
+    ] = training_errors.abs().mean()
+
+    fit_comparison.loc[
+        model_name,
+        "Training RMSE"
+    ] = (
+        (
+            training_errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+    fit_comparison.loc[
+        model_name,
+        "Validation MAE"
+    ] = all_validation_results.loc[
+        model_name,
+        "MAE_cfs"
+    ]
+
+    fit_comparison.loc[
+        model_name,
+        "Validation RMSE"
+    ] = all_validation_results.loc[
+        model_name,
+        "RMSE_cfs"
+    ]
+
+fit_comparison.round(
+    3
+)
+```
+
+### 13.11 Visualize Validation MAE
+
+```{python}
+#| label: fig-model-validation-mae
+#| fig-cap: "Validation MAE for the fixed candidate models and baselines."
+#| fig-align: center
+
+mae_plot = (
+    all_validation_results.sort_values(
+        "MAE_cfs",
+        ascending=False
+    )
+)
+
+plt.figure(
+    figsize=(
+        10,
+        5
+    )
+)
+
+plt.barh(
+    mae_plot.index,
+    mae_plot[
+        "MAE_cfs"
+    ]
+)
+
+plt.xlabel(
+    "Validation MAE (cfs)"
+)
+
+plt.ylabel(
+    "Method"
+)
+
+plt.title(
+    "Validation Error across Candidate Methods"
+)
+
+plt.xlim(
+    left=0
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 13.12 Validation Interpretation
+
+The fixed random-forest configuration has the lowest validation MAE and
+RMSE among the rainfall-only models.
+
+Persistence nevertheless has the lowest overall validation MAE.
+
+The random forest has the lowest validation RMSE.
+
+Therefore no single method dominates under both validation metrics.
+
+Overall MAE and RMSE do not establish flood-event prediction performance.
+
+### 13.13 Save Results and Configuration
+
+```{python}
+ml_results_dir = Path(
+    "Results/Tables"
+)
+
+ml_results_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+all_validation_results.to_csv(
+    ml_results_dir
+    / "13_validation_model_comparison.csv",
+    index_label="Model"
+)
+
+fit_comparison.to_csv(
+    ml_results_dir
+    / "13_training_validation_errors.csv",
+    index_label="Model"
+)
+
+ml_validation.to_csv(
+    ml_results_dir
+    / "13_validation_predictions.csv",
+    index=False,
+    date_format="%Y-%m-%d"
+)
+
+scaling_table.to_csv(
+    ml_results_dir
+    / "13_ridge_scaling.csv",
+    index_label="Predictor"
+)
+
+model_settings = pd.DataFrame(
+    index=list(
+        ml_columns
+    )
+)
+
+model_settings[
+    "Settings"
+] = [
+    str(
+        ridge_model.get_params()
+    ),
+    str(
+        tree_model.get_params()
+    ),
+    str(
+        forest_model.get_params()
+    )
+]
+
+model_settings[
+    "scikit-learn version"
+] = sklearn.__version__
+
+model_settings.to_csv(
+    ml_results_dir
+    / "13_model_settings.csv",
+    index_label="Model"
+)
+
+print(
+    "Saved Part 13 results in:",
+    ml_results_dir
+)
+```
+
+# Robustness and Final Evaluation
+
+## Part 14 — Robustness and Higher-Flow Performance
+
+### 14.1 Purpose
+
+The validation comparison summarizes average prediction error across all
+retained validation dates.
+
+It does not show whether the conclusions depend strongly on provisional
+flow records or whether model errors are different during unusually
+high-flow conditions.
+
+Therefore, perform two additional checks:
+
+1. evaluate the fitted models on validation dates whose target and
+   previous-day flow values are both unflagged;
+2. evaluate performance when observed flow exceeds a threshold defined
+   from the training period only.
+
+No model is refitted or tuned in this section.
+
+### 14.2 Define the Common Prediction Columns
+
+```{python}
+robustness_prediction_columns = {
+    "Training mean":
+        "PRED_MEAN_CFS",
+
+    "Calendar-month mean":
+        "PRED_MONTH_MEAN_CFS",
+
+    "Previous-day flow":
+        "PRED_PERSISTENCE_CFS",
+
+    "One-day rainfall OLS":
+        "PRED_SIMPLE_OLS_CFS",
+
+    "Three-window rainfall OLS":
+        "PRED_MULTIPLE_OLS_CFS",
+
+    "Ridge rainfall":
+        "PRED_RIDGE_CFS",
+
+    "Regression tree rainfall":
+        "PRED_TREE_CFS",
+
+    "Random forest rainfall":
+        "PRED_FOREST_CFS"
+}
+
+for robustness_column in (
+    robustness_prediction_columns.values()
+):
+
+    if robustness_column not in (
+        ml_validation.columns
+    ):
+
+        raise ValueError(
+            "Missing validation prediction column: "
+            + robustness_column
+        )
+```
+
+### 14.3 Quality-Status Sensitivity Sample
+
+The main experiment retains provisional site-58A observations.
+
+For this sensitivity check, a validation date is retained only when:
+
+- the target flow is not marked provisional;
+- previous-day flow is not marked provisional.
+
+This does not mean provisional observations are wrong.
+
+It only asks whether the main validation pattern changes on a more
+restricted subset.
+
+```{python}
+validation_target_unflagged = (
+    ml_validation[
+        "PROVISIONAL_FLAG"
+    ]
+    .eq(
+        False
+    )
+    .fillna(
+        False
+    )
+)
+
+validation_previous_unflagged = (
+    ml_validation[
+        "FLOW_PREV_1D_PROVISIONAL"
+    ]
+    .eq(
+        False
+    )
+    .fillna(
+        False
+    )
+)
+
+validation_quality_mask = (
+    validation_target_unflagged
+    & validation_previous_unflagged
+)
+
+validation_quality_subset = (
+    ml_validation.loc[
+        validation_quality_mask
+    ].copy()
+)
+
+print(
+    "Full validation rows:",
+    len(
+        ml_validation
+    )
+)
+
+print(
+    "Quality-sensitivity rows:",
+    len(
+        validation_quality_subset
+    )
+)
+```
+
+### 14.4 Score the Quality-Sensitivity Sample
+
+```{python}
+quality_sensitivity_results = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+quality_sensitivity_results.index.name = (
+    "Method"
+)
+
+quality_sensitivity_results[
+    "Validation days"
+] = len(
+    validation_quality_subset
+)
+
+for method_name in (
+    robustness_prediction_columns
+):
+
+    prediction_column = (
+        robustness_prediction_columns[
+            method_name
+        ]
+    )
+
+    observed = (
+        validation_quality_subset[
+            "FLOW_CFS"
+        ]
+    )
+
+    predicted = (
+        validation_quality_subset[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        observed
+        - predicted
+    )
+
+    quality_sensitivity_results.loc[
+        method_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    quality_sensitivity_results.loc[
+        method_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+quality_sensitivity_results.round(
+    3
+)
+```
+
+The models are not refitted on this restricted sample.
+
+Therefore this analysis checks evaluation sensitivity, not the influence
+of provisional training observations on fitted coefficients.
+
+### 14.5 Define a Training-Based Higher-Flow Threshold
+
+Higher flow is defined as the 90th percentile of training responses.
+
+$$
+q_{0.90}
+=
+\operatorname{Quantile}_{0.90}
+\left(
+Q_t:
+t\in\mathcal T_{\mathrm{train}}
+\right).
+$$
+
+The threshold is estimated only from the 2015–2021 training period.[^pandas-quantile]
+
+It is a statistical threshold, not an official flood threshold.
+
+```{python}
+high_flow_threshold_cfs = (
+    train[
+        "FLOW_CFS"
+    ].quantile(
+        0.90
+    )
+)
+
+print(
+    "Training 90th-percentile flow threshold (cfs):",
+    round(
+        high_flow_threshold_cfs,
+        3
+    )
+)
+```
+
+### 14.6 Create the Higher-Flow Validation Subset
+
+```{python}
+validation_high_flow_mask = (
+    ml_validation[
+        "FLOW_CFS"
+    ]
+    >= high_flow_threshold_cfs
+)
+
+validation_high_flow = (
+    ml_validation.loc[
+        validation_high_flow_mask
+    ].copy()
+)
+
+print(
+    "Higher-flow validation dates:",
+    len(
+        validation_high_flow
+    )
+)
+
+print(
+    "Minimum observed flow in subset:",
+    round(
+        validation_high_flow[
+            "FLOW_CFS"
+        ].min(),
+        3
+    )
+)
+
+print(
+    "Maximum observed flow in subset:",
+    round(
+        validation_high_flow[
+            "FLOW_CFS"
+        ].max(),
+        3
+    )
+)
+```
+
+### 14.7 Evaluate Higher-Flow Validation Performance
+
+```{python}
+high_flow_validation_results = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+high_flow_validation_results.index.name = (
+    "Method"
+)
+
+high_flow_validation_results[
+    "Higher-flow days"
+] = len(
+    validation_high_flow
+)
+
+for method_name in (
+    robustness_prediction_columns
+):
+
+    prediction_column = (
+        robustness_prediction_columns[
+            method_name
+        ]
+    )
+
+    observed = (
+        validation_high_flow[
+            "FLOW_CFS"
+        ]
+    )
+
+    predicted = (
+        validation_high_flow[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        observed
+        - predicted
+    )
+
+    high_flow_validation_results.loc[
+        method_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    high_flow_validation_results.loc[
+        method_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+high_flow_validation_results.round(
+    3
+)
+```
+
+### 14.8 Compare Overall and Higher-Flow MAE
+
+```{python}
+validation_robustness_comparison = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+validation_robustness_comparison.index.name = (
+    "Method"
+)
+
+validation_robustness_comparison[
+    "Overall_MAE_cfs"
+] = all_validation_results[
+    "MAE_cfs"
+]
+
+validation_robustness_comparison[
+    "Quality_subset_MAE_cfs"
+] = quality_sensitivity_results[
+    "MAE_cfs"
+]
+
+validation_robustness_comparison[
+    "Higher_flow_MAE_cfs"
+] = high_flow_validation_results[
+    "MAE_cfs"
+]
+
+validation_robustness_comparison.round(
+    3
+)
+```
+
+```{python}
+#| label: fig-validation-high-flow-mae
+#| fig-cap: "Validation MAE on all retained dates and on dates above the training-period 90th-percentile flow threshold."
+#| fig-align: center
+
+high_flow_plot = (
+    validation_robustness_comparison[
+        [
+            "Overall_MAE_cfs",
+            "Higher_flow_MAE_cfs"
+        ]
+    ].copy()
+)
+
+high_flow_plot = (
+    high_flow_plot.sort_values(
+        "Overall_MAE_cfs",
+        ascending=True
+    )
+)
+
+plot_positions = list(
+    range(
+        len(
+            high_flow_plot
+        )
+    )
+)
+
+bar_width = 0.38
+
+plt.figure(
+    figsize=(
+        10,
+        6
+    )
+)
+
+plt.barh(
+    [
+        position
+        - bar_width / 2
+        for position in (
+            plot_positions
+        )
+    ],
+    high_flow_plot[
+        "Overall_MAE_cfs"
+    ],
+    height=bar_width,
+    label="All validation dates"
+)
+
+plt.barh(
+    [
+        position
+        + bar_width / 2
+        for position in (
+            plot_positions
+        )
+    ],
+    high_flow_plot[
+        "Higher_flow_MAE_cfs"
+    ],
+    height=bar_width,
+    label="Higher-flow dates"
+)
+
+plt.yticks(
+    plot_positions,
+    high_flow_plot.index
+)
+
+plt.xlabel(
+    "MAE (cfs)"
+)
+
+plt.ylabel(
+    "Method"
+)
+
+plt.title(
+    "Overall and Higher-Flow Validation Error"
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 14.9 Robustness Findings
+
+The quality-status sensitivity sample contains 236 validation dates.
+
+Approximate MAE on this restricted sample is:
+
+| Method | MAE (cfs) |
+|---|---:|
+| Previous-day flow | 1.984 |
+| Random forest rainfall | 2.097 |
+| Regression tree rainfall | 2.156 |
+| Three-window rainfall OLS | 2.309 |
+| Ridge rainfall | 2.312 |
+
+The main validation pattern therefore remains broadly similar after the
+quality-status restriction.
+
+The training-period 90th-percentile flow threshold is approximately:
+
+$$
+19.368\ \text{cfs}.
+$$
+
+Forty validation dates meet or exceed this threshold.
+
+Approximate higher-flow MAE is:
+
+| Method | Higher-flow MAE (cfs) |
+|---|---:|
+| Random forest rainfall | 9.892 |
+| Regression tree rainfall | 9.946 |
+| Three-window rainfall OLS | 10.439 |
+| Ridge rainfall | 10.448 |
+| One-day rainfall OLS | 11.456 |
+| Previous-day flow | 13.820 |
+
+Persistence has the lowest overall validation MAE but does not have the
+lowest MAE on the higher-flow subset.
+
+This does not establish flood-warning performance because the subset uses
+daily mean discharge and contains only 40 dates.
+
+### 14.10 Save Robustness Results
+
+```{python}
+robustness_results_dir = Path(
+    "Results/Tables"
+)
+
+robustness_results_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+quality_sensitivity_results.to_csv(
+    robustness_results_dir
+    / "14_quality_sensitivity_validation.csv",
+    index_label="Method"
+)
+
+high_flow_validation_results.to_csv(
+    robustness_results_dir
+    / "14_high_flow_validation.csv",
+    index_label="Method"
+)
+
+validation_robustness_comparison.to_csv(
+    robustness_results_dir
+    / "14_validation_robustness_comparison.csv",
+    index_label="Method"
+)
+
+high_flow_settings = pd.DataFrame(
+    {
+        "Setting": [
+            "Training flow quantile",
+            "Higher-flow threshold (cfs)",
+            "Validation higher-flow days",
+            "Quality-sensitivity validation days"
+        ],
+
+        "Value": [
+            0.90,
+            high_flow_threshold_cfs,
+            len(
+                validation_high_flow
+            ),
+            len(
+                validation_quality_subset
+            )
+        ]
+    }
+)
+
+high_flow_settings.to_csv(
+    robustness_results_dir
+    / "14_robustness_settings.csv",
+    index=False
+)
+
+print(
+    "Saved Part 14 results in:",
+    robustness_results_dir
+)
+```
+
+## Part 15 — Final Test Evaluation
+
+### 15.1 Freeze the Evaluation Policy
+
+The reserved test period covers January 1, 2024 through December 31, 2025.
+
+The following choices remain fixed before test scoring:
+
+- rainfall predictors;
+- chronological period boundaries;
+- baseline definitions;
+- OLS specifications;
+- ridge penalty;
+- tree and forest settings;
+- MAE and RMSE definitions;
+- higher-flow threshold;
+- treatment of provisional records.
+
+The estimators remain those fitted using 2015–2021 training observations.
+
+Validation data are not added to the fitting sample before the final test.
+
+This conservative choice avoids introducing a new refitting rule after
+validation results have already been inspected.[^time-design]
+
+### 15.2 Prepare the Test Table
+
+```{python}
+test_predictions = (
+    test.copy()
+)
+
+if len(
+    test_predictions
+) == 0:
+
+    raise ValueError(
+        "The reserved test sample is empty."
+    )
+
+print(
+    "Test rows:",
+    len(
+        test_predictions
+    )
+)
+
+print(
+    "First test date:",
+    test_predictions[
+        "DATE"
+    ].min()
+)
+
+print(
+    "Last test date:",
+    test_predictions[
+        "DATE"
+    ].max()
+)
+```
+
+### 15.3 Apply the Three Baselines
+
+```{python}
+test_predictions[
+    "PRED_MEAN_CFS"
+] = training_mean
+
+test_predictions[
+    "PRED_MONTH_MEAN_CFS"
+] = test_predictions[
+    "MONTH"
+].map(
+    training_month_means
+)
+
+test_predictions[
+    "PRED_PERSISTENCE_CFS"
+] = test_predictions[
+    "FLOW_PREV_1D_CFS"
+]
+
+if test_predictions[
+    [
+        "PRED_MEAN_CFS",
+        "PRED_MONTH_MEAN_CFS",
+        "PRED_PERSISTENCE_CFS"
+    ]
+].isna().any().any():
+
+    raise ValueError(
+        "A test baseline prediction is missing."
+    )
+```
+
+### 15.4 Apply the OLS Models
+
+```{python}
+X_test = (
+    test[
+        rain_predictors
+    ].copy()
+)
+
+X_test_simple = (
+    X_test[
+        [
+            "RAIN_PREV_1D_MM"
+        ]
+    ].copy()
+)
+
+X_test_simple = sm.add_constant(
+    X_test_simple,
+    has_constant="add"
+)
+
+X_test_multiple = sm.add_constant(
+    X_test,
+    has_constant="add"
+)
+
+test_predictions[
+    "PRED_SIMPLE_OLS_CFS"
+] = simple_fit.predict(
+    X_test_simple
+)
+
+test_predictions[
+    "PRED_MULTIPLE_OLS_CFS"
+] = multiple_fit.predict(
+    X_test_multiple
+)
+```
+
+### 15.5 Apply Ridge, Tree, and Random Forest
+
+Ridge uses the training-period scaling quantities from Part 13.
+
+```{python}
+X_test_scaled = (
+    X_test
+    - rain_training_means
+) / rain_training_scales
+
+test_predictions[
+    "PRED_RIDGE_CFS"
+] = ridge_model.predict(
+    X_test_scaled
+)
+
+test_predictions[
+    "PRED_TREE_CFS"
+] = tree_model.predict(
+    X_test
+)
+
+test_predictions[
+    "PRED_FOREST_CFS"
+] = forest_model.predict(
+    X_test
+)
+
+test_model_columns = list(
+    robustness_prediction_columns.values()
+)
+
+if test_predictions[
+    test_model_columns
+].isna().any().any():
+
+    raise ValueError(
+        "A final test prediction is missing."
+    )
+```
+
+### 15.6 Calculate Final Test MAE and RMSE
+
+All methods are scored on the same 723 test dates.
+
+```{python}
+final_test_results = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+final_test_results.index.name = (
+    "Method"
+)
+
+final_test_results[
+    "Test days"
+] = len(
+    test_predictions
+)
+
+for method_name in (
+    robustness_prediction_columns
+):
+
+    prediction_column = (
+        robustness_prediction_columns[
+            method_name
+        ]
+    )
+
+    observed = (
+        test_predictions[
+            "FLOW_CFS"
+        ]
+    )
+
+    predicted = (
+        test_predictions[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        observed
+        - predicted
+    )
+
+    final_test_results.loc[
+        method_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    final_test_results.loc[
+        method_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+final_test_results.round(
+    3
+)
+```
+
+### 15.7 Compare Validation and Test Performance
+
+```{python}
+validation_test_comparison = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+validation_test_comparison.index.name = (
+    "Method"
+)
+
+validation_test_comparison[
+    "Validation_MAE_cfs"
+] = all_validation_results[
+    "MAE_cfs"
+]
+
+validation_test_comparison[
+    "Test_MAE_cfs"
+] = final_test_results[
+    "MAE_cfs"
+]
+
+validation_test_comparison[
+    "Validation_RMSE_cfs"
+] = all_validation_results[
+    "RMSE_cfs"
+]
+
+validation_test_comparison[
+    "Test_RMSE_cfs"
+] = final_test_results[
+    "RMSE_cfs"
+]
+
+validation_test_comparison.round(
+    3
+)
+```
+
+```{python}
+#| label: fig-final-test-mae
+#| fig-cap: "Final MAE on the reserved 2024–2025 test sample."
+#| fig-align: center
+
+final_mae_plot = (
+    final_test_results.sort_values(
+        "MAE_cfs",
+        ascending=False
+    )
+)
+
+plt.figure(
+    figsize=(
+        10,
+        5
+    )
+)
+
+plt.barh(
+    final_mae_plot.index,
+    final_mae_plot[
+        "MAE_cfs"
+    ]
+)
+
+plt.xlabel(
+    "Final test MAE (cfs)"
+)
+
+plt.ylabel(
+    "Method"
+)
+
+plt.title(
+    "Reserved Test Error: 2024–2025"
+)
+
+plt.xlim(
+    left=0
+)
+
+plt.tight_layout()
+
+plt.show()
+```
+
+The following figure compares MAE between the development-period validation
+sample and the reserved test sample. It is intended to show changes in
+generalization rather than to select a new model from the test results.
+
+```{python}
+#| label: fig-validation-test-mae
+#| fig-cap: "Validation and final-test MAE for all candidate methods. Test results are shown for final evaluation, not for additional model selection."
+#| fig-align: center
+
+validation_test_mae_plot = (
+    validation_test_comparison[
+        [
+            "Validation_MAE_cfs",
+            "Test_MAE_cfs"
+        ]
+    ].copy()
+)
+
+validation_test_mae_plot = (
+    validation_test_mae_plot.sort_values(
+        "Validation_MAE_cfs",
+        ascending=True
+    )
+)
+
+validation_test_positions = list(
+    range(
+        len(
+            validation_test_mae_plot
+        )
+    )
+)
+
+validation_test_bar_width = 0.38
+
+plt.figure(
+    figsize=(
+        10,
+        6
+    )
+)
+
+plt.barh(
+    [
+        position
+        - validation_test_bar_width / 2
+        for position in validation_test_positions
+    ],
+    validation_test_mae_plot[
+        "Validation_MAE_cfs"
+    ],
+    height=validation_test_bar_width,
+    label="Validation: 2022–2023"
+)
+
+plt.barh(
+    [
+        position
+        + validation_test_bar_width / 2
+        for position in validation_test_positions
+    ],
+    validation_test_mae_plot[
+        "Test_MAE_cfs"
+    ],
+    height=validation_test_bar_width,
+    label="Test: 2024–2025"
+)
+
+plt.yticks(
+    validation_test_positions,
+    validation_test_mae_plot.index
+)
+
+plt.xlabel(
+    "MAE (cfs)"
+)
+
+plt.ylabel(
+    "Method"
+)
+
+plt.title(
+    "Validation and Final-Test Error"
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+```
+
+### 15.8 Visual Comparison on the Final Test Period
+
+A time-series comparison helps show how the models behave across the full
+2024–2025 test period, not just through summary error statistics.
+
+The figure below compares:
+
+- the observed daily mean flow;
+- the previous-day-flow persistence benchmark;
+- the three-window rainfall OLS model;
+- the random forest rainfall model.
+
+These three prediction series are shown because they represent:
+
+- the strongest overall benchmark (persistence);
+- the strongest simple rainfall model on the final test (three-window OLS);
+- the strongest flexible rainfall model during validation (random forest).
+
+```{python}
+#| label: fig-final-test-timeseries
+#| fig-cap: "Observed daily flow and selected model predictions during the reserved 2024–2025 test period."
+#| fig-align: center
+
+plot_test = test_predictions[
+    [
+        "DATE",
+        "FLOW_CFS",
+        "PRED_PERSISTENCE_CFS",
+        "PRED_MULTIPLE_OLS_CFS",
+        "PRED_FOREST_CFS"
+    ]
+].copy()
+
+plt.figure(
+    figsize=(
+        12,
+        5
+    )
+)
+
+plt.plot(
+    plot_test[
+        "DATE"
+    ],
+    plot_test[
+        "FLOW_CFS"
+    ],
+    label="Observed flow",
+    linewidth=1.4
+)
+
+plt.plot(
+    plot_test[
+        "DATE"
+    ],
+    plot_test[
+        "PRED_PERSISTENCE_CFS"
+    ],
+    label="Previous-day flow",
+    linewidth=1.0
+)
+
+plt.plot(
+    plot_test[
+        "DATE"
+    ],
+    plot_test[
+        "PRED_MULTIPLE_OLS_CFS"
+    ],
+    label="Three-window rainfall OLS",
+    linewidth=1.0
+)
+
+plt.plot(
+    plot_test[
+        "DATE"
+    ],
+    plot_test[
+        "PRED_FOREST_CFS"
+    ],
+    label="Random forest rainfall",
+    linewidth=1.0
+)
+
+plt.title(
+    "Observed and Predicted Daily Flow: Final Test Period"
+)
+
+plt.xlabel(
+    "Date"
+)
+
+plt.ylabel(
+    "Daily mean flow (cfs)"
+)
+
+plt.xlim(
+    pd.Timestamp("2024-01-01"),
+    pd.Timestamp("2025-12-31")
+)
+
+plt.ylim(
+    bottom=0
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+```
+
+The persistence series usually tracks short-run day-to-day movement closely,
+which is consistent with its low overall test error.
+
+The rainfall-only models are less accurate overall, but their behavior near
+larger flow increases can still be visually compared with the persistence
+benchmark and the observed series.
+
+This figure is descriptive. It complements MAE and RMSE, but it does not
+replace the numerical evaluation tables.
+
+### 15.9 Higher-Flow Test Performance
+
+The higher-flow threshold remains the training-period value from Part 14.
+
+It is not recomputed from the test period.
+
+```{python}
+test_high_flow_mask = (
+    test_predictions[
+        "FLOW_CFS"
+    ]
+    >= high_flow_threshold_cfs
+)
+
+test_high_flow = (
+    test_predictions.loc[
+        test_high_flow_mask
+    ].copy()
+)
+
+print(
+    "Higher-flow test dates:",
+    len(
+        test_high_flow
+    )
+)
+
+final_high_flow_results = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+final_high_flow_results.index.name = (
+    "Method"
+)
+
+final_high_flow_results[
+    "Higher-flow test days"
+] = len(
+    test_high_flow
+)
+
+for method_name in (
+    robustness_prediction_columns
+):
+
+    prediction_column = (
+        robustness_prediction_columns[
+            method_name
+        ]
+    )
+
+    observed = (
+        test_high_flow[
+            "FLOW_CFS"
+        ]
+    )
+
+    predicted = (
+        test_high_flow[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        observed
+        - predicted
+    )
+
+    final_high_flow_results.loc[
+        method_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    final_high_flow_results.loc[
+        method_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+final_high_flow_results.round(
+    3
+)
+```
+
+### 15.10 Final Quality-Sensitivity Check
+
+```{python}
+test_target_unflagged = (
+    test_predictions[
+        "PROVISIONAL_FLAG"
+    ]
+    .eq(
+        False
+    )
+    .fillna(
+        False
+    )
+)
+
+test_previous_unflagged = (
+    test_predictions[
+        "FLOW_PREV_1D_PROVISIONAL"
+    ]
+    .eq(
+        False
+    )
+    .fillna(
+        False
+    )
+)
+
+test_quality_mask = (
+    test_target_unflagged
+    & test_previous_unflagged
+)
+
+test_quality_subset = (
+    test_predictions.loc[
+        test_quality_mask
+    ].copy()
+)
+
+print(
+    "Quality-sensitivity test rows:",
+    len(
+        test_quality_subset
+    )
+)
+
+final_quality_results = pd.DataFrame(
+    index=list(
+        robustness_prediction_columns
+    )
+)
+
+final_quality_results.index.name = (
+    "Method"
+)
+
+final_quality_results[
+    "Test days"
+] = len(
+    test_quality_subset
+)
+
+for method_name in (
+    robustness_prediction_columns
+):
+
+    prediction_column = (
+        robustness_prediction_columns[
+            method_name
+        ]
+    )
+
+    observed = (
+        test_quality_subset[
+            "FLOW_CFS"
+        ]
+    )
+
+    predicted = (
+        test_quality_subset[
+            prediction_column
+        ]
+    )
+
+    errors = (
+        observed
+        - predicted
+    )
+
+    final_quality_results.loc[
+        method_name,
+        "MAE_cfs"
+    ] = errors.abs().mean()
+
+    final_quality_results.loc[
+        method_name,
+        "RMSE_cfs"
+    ] = (
+        (
+            errors ** 2
+        ).mean()
+        ** 0.5
+    )
+
+final_quality_results.round(
+    3
+)
+```
+
+### 15.11 Final Test Findings
+
+The final test contains 723 usable dates from 2024–2025.
+
+Approximate overall test scores are:
+
+| Method | Test MAE (cfs) | Test RMSE (cfs) |
+|---|---:|---:|
+| Training mean | 4.430 | 5.247 |
+| Calendar-month mean | 3.650 | 4.718 |
+| Previous-day flow | 1.640 | 3.230 |
+| One-day rainfall OLS | 3.603 | 4.384 |
+| Three-window rainfall OLS | 3.239 | 4.059 |
+| Ridge rainfall | 3.240 | 4.058 |
+| Regression tree rainfall | 3.325 | 4.418 |
+| Random forest rainfall | 3.249 | 4.274 |
+
+The validation ordering does not transfer perfectly to the final test.
+
+The random forest had the lowest validation errors among the rainfall-only
+models.
+
+On the final test, three-window OLS has the lowest rainfall-only MAE,
+approximately 3.239 cfs.
+
+Ridge has the lowest rainfall-only RMSE, approximately 4.058 cfs, only
+about 0.001 cfs lower than three-window OLS.
+
+Previous-day flow has the lowest overall test MAE and RMSE:
+
+$$
+\mathrm{MAE}
+\approx
+1.640\ \text{cfs},
+$$
+
+$$
+\mathrm{RMSE}
+\approx
+3.230\ \text{cfs}.
+$$
+
+The final higher-flow subset contains 18 dates.
+
+Approximate higher-flow test MAE is:
+
+| Method | Higher-flow Test MAE (cfs) |
+|---|---:|
+| Random forest rainfall | 5.885 |
+| Regression tree rainfall | 5.994 |
+| Three-window rainfall OLS | 6.577 |
+| Ridge rainfall | 6.596 |
+| One-day rainfall OLS | 6.981 |
+| Calendar-month mean | 8.526 |
+| Previous-day flow | 8.933 |
+
+Persistence is therefore strongest overall but not strongest on the small
+higher-flow test subset.
+
+This distinction shows that a model with the lowest average daily error
+need not have the lowest error on unusually high-flow dates.
+
+The quality-status sensitivity test retains 693 of the 723 final-test
+dates. On this restricted sample, previous-day flow still has the lowest
+overall error, with MAE of approximately 1.561 cfs and RMSE of
+approximately 3.142 cfs.
+
+Among the rainfall-only models, three-window OLS and ridge remain nearly
+indistinguishable. Their MAE values are approximately 3.221 and 3.223 cfs,
+while their RMSE values are approximately 4.013 and 4.012 cfs,
+respectively.
+
+The main final-test interpretation therefore does not depend on including
+the provisional current-flow or previous-flow observations removed by this
+sensitivity rule. This does not prove that all retained unflagged records
+are error-free; it only shows that the principal model ranking is stable
+under this particular restriction.
+
+### 15.12 Save Final Evaluation Results
+
+```{python}
+final_results_dir = Path(
+    "Results/Tables"
+)
+
+final_results_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+final_test_results.to_csv(
+    final_results_dir
+    / "15_final_test_scores.csv",
+    index_label="Method"
+)
+
+validation_test_comparison.to_csv(
+    final_results_dir
+    / "15_validation_test_comparison.csv",
+    index_label="Method"
+)
+
+final_high_flow_results.to_csv(
+    final_results_dir
+    / "15_final_high_flow_test.csv",
+    index_label="Method"
+)
+
+final_quality_results.to_csv(
+    final_results_dir
+    / "15_final_quality_sensitivity.csv",
+    index_label="Method"
+)
+
+test_predictions.to_csv(
+    final_results_dir
+    / "15_final_test_predictions.csv",
+    index=False,
+    date_format="%Y-%m-%d",
+    na_rep=""
+)
+
+print(
+    "Saved final evaluation results in:",
+    final_results_dir
+)
+```
+
+# Conclusions
+
+## Part 16 — Discussion and Conclusions
+
+### 16.1 Research Question and Scope
+
+This project examines whether historical precipitation at Seattle Sand
+Point can support prediction of daily mean streamflow at King County
+site 58A.
+
+The study uses previous 1-, 3-, and 7-day precipitation histories and
+evaluates several statistical and machine-learning models with chronological
+training, validation, and test periods.
+
+The modeled response is daily mean discharge.
+
+It is not an observed flood-event label, instantaneous peak discharge,
+or measured inundation extent.
+
+### 16.2 Data Preparation Findings
+
+The Seattle precipitation study period contains 4,018 calendar dates.
+
+After quality screening, 31 dates have unavailable precipitation.
+
+Missing precipitation is not replaced with zero.
+
+The site-58A streamflow calendar also contains 4,018 dates, with 44 missing
+daily discharge values.
+
+There are 753 provisional flow records in the source export.
+
+Rainfall-history features are calculated only after restoring the complete
+daily calendar.
+
+This prevents missing days from being skipped when defining 1-, 3-, and
+7-day rainfall histories.
+
+### 16.3 Rainfall-History Modeling
+
+The one-day rainfall OLS model provides a simple rainfall-only reference.
+
+Adding the previous 3-day and 7-day rainfall totals improves both training
+fit and validation prediction.
+
+Three-window OLS has validation MAE of approximately 2.865 cfs, compared
+with approximately 3.523 cfs for one-day rainfall OLS.
+
+This indicates that accumulated recent rainfall contains useful predictive
+information beyond the immediately preceding day's rainfall.
+
+The cumulative windows overlap, so individual coefficients are not
+independent physical runoff effects.
+
+### 16.4 Validation Model Comparison
+
+The validation comparison contains 653 dates from 2022–2023.
+
+Among the rainfall-only candidates, the random forest has the lowest
+validation errors:
+
+$$
+\mathrm{MAE}
+\approx
+2.649\ \text{cfs},
+$$
+
+$$
+\mathrm{RMSE}
+\approx
+4.151\ \text{cfs}.
+$$
+
+Persistence nevertheless has the lowest overall validation MAE:
+
+$$
+2.557\ \text{cfs}.
+$$
+
+The random forest has the lowest validation RMSE.
+
+No single method is therefore strongest under both development-period
+metrics.
+
+### 16.5 Robustness and Higher-Flow Behavior
+
+Restricting validation to dates whose current and previous-day flow records
+are both unflagged does not substantially change the main ordering.
+The same stability appears in the reserved test period. After restricting
+the test sample to 693 dates whose current and previous-day flow records
+are both unflagged, persistence still has the lowest overall MAE and RMSE,
+while the relative ordering of the main rainfall-only candidates changes
+very little.
+
+Persistence remains strongest on overall MAE, while the random forest
+remains the strongest tested rainfall-only model on this restricted
+validation subset.
+
+The higher-flow comparison gives a different pattern.
+
+Using the training-period 90th percentile, approximately 19.368 cfs, as a
+fixed threshold, rainfall-only models outperform persistence on the
+higher-flow validation subset.
+
+The same qualitative pattern appears in the higher-flow test subset.
+
+This suggests that previous-day flow is especially effective for typical
+daily conditions, while rainfall history may contain relatively more
+information during larger flow responses.
+
+However, the higher-flow subsets contain only 40 validation dates and
+18 test dates.
+
+They do not provide enough evidence for a strong flood-warning claim.
+
+### 16.6 Final Test Results
+
+The reserved 2024–2025 test contains 723 usable dates.
+
+Previous-day flow has the lowest overall final-test error:
+
+$$
+\mathrm{MAE}
+\approx
+1.640\ \text{cfs},
+$$
+
+$$
+\mathrm{RMSE}
+\approx
+3.230\ \text{cfs}.
+$$
+
+Among rainfall-only models, three-window OLS has the lowest final-test MAE
+at approximately 3.239 cfs.
+
+Ridge has the lowest rainfall-only RMSE at approximately 4.058 cfs, only
+about 0.001 cfs below the three-window OLS result.
+
+The random forest had the strongest rainfall-only validation results but
+does not retain that advantage on the later test period.
+
+The more flexible model therefore does not generalize uniformly better.
+
+### 16.7 Main Interpretation
+
+The project supports three main conclusions.
+
+First, rainfall history is informative.
+
+Models using previous 1-, 3-, and 7-day precipitation consistently improve
+on simple mean-based benchmarks.
+
+Second, recent streamflow is a very strong short-term predictor.
+
+Previous-day-flow persistence has the lowest overall validation MAE and
+the lowest overall MAE and RMSE on the final test.
+
+Third, greater model complexity does not guarantee stronger out-of-sample
+performance.
+
+The random forest performs best among rainfall-only candidates on
+validation, but this advantage does not persist in 2024–2025.
+
+The three-window OLS and ridge models generalize at least as well on the
+reserved period.
+
+The higher-flow analysis adds an important qualification.
+
+Rainfall-based models outperform persistence on the selected higher-flow
+dates even though persistence is much stronger on average across all days.
+
+### 16.8 Limitations
+
+| Limitation | Consequence |
+|---|---|
+| Single rainfall station | Sand Point precipitation is a point measurement and may not represent rainfall over the full upstream drainage area. |
+| Timing convention | Date labels and historical publication timing do not establish a verified operational forecast lead time. |
+| Daily aggregation | Daily mean discharge can smooth short-duration flow peaks. |
+| Missing and provisional observations | Complete-case rules change the analyzed sample, and provisional flow records remain in the main fits. |
+| Temporal dependence | OLS residuals retain serial dependence, limiting default independent-error inference.[^regression-diagnostics] |
+| Validation reuse | Several models were compared repeatedly on the same validation period.[^time-design] |
+| Higher-flow sample size | Only 40 validation dates and 18 test dates exceed the fixed higher-flow threshold. |
+| Flood definition | Higher daily mean discharge is not identical to an observed flood or inundation event. |
+
+The test period appeared in earlier descriptive inspection of the full
+dataset, so it was not completely unseen in every descriptive sense.
+
+However, test prediction errors were not used to select predictors,
+hyperparameters, or the higher-flow threshold.
+
+### 16.9 Conclusion
+
+Historical Seattle precipitation contains useful information for predicting
+daily mean streamflow at site 58A, particularly when rainfall is summarized
+over multiple preceding days.
+
+The project does not show that a more complex rainfall model is always
+preferable.
+
+Although the random forest gives the strongest rainfall-only validation
+results, that advantage does not persist in the reserved 2024–2025 test.
+
+A simple three-window OLS model performs competitively in the final period,
+while previous-day streamflow remains the strongest overall daily
+benchmark.
+
+The higher-flow analysis produces a different pattern: rainfall-based
+models have smaller errors than persistence on the selected higher-flow
+dates.
+
+Together, these results emphasize the importance of chronological
+evaluation, strong simple benchmarks, and performance checks beyond one
+overall error statistic.
+
+The project should be interpreted as a retrospective daily
+streamflow-prediction study rather than an operational flood-warning
+system.
+
+:::
+
+```{=html}
+<style>
+.report-page-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--bs-border-color, #ddd);
+}
+
+.report-page-status {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+}
+
+@media print {
+  .report-page-nav {
+    display: none !important;
+  }
+}
+</style>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const tabset = document.getElementById("report-tabs");
+
+  if (!tabset) return;
+
+  const tabs = tabset.querySelectorAll(
+    ":scope > .nav-tabs [role='tab']"
+  );
+
+  const pages = tabset.querySelectorAll(
+    ":scope > .tab-content > .tab-pane"
+  );
+
+  if (
+    tabs.length === 0
+    || tabs.length !== pages.length
+  ) return;
+
+  function openPage(index) {
+    tabs[index].click();
+
+    requestAnimationFrame(
+      function () {
+        tabs[index].focus({
+          preventScroll: true
+        });
+
+        tabset.scrollIntoView({
+          behavior: "auto",
+          block: "start"
+        });
+      }
+    );
+  }
+
+  for (
+    let pageIndex = 0;
+    pageIndex < pages.length;
+    pageIndex++
+  ) {
+    if (
+      pages[pageIndex].querySelector(
+        ".report-page-nav"
+      )
+    ) continue;
+
+    const nav = document.createElement(
+      "nav"
+    );
+
+    nav.className =
+      "report-page-nav";
+
+    nav.setAttribute(
+      "aria-label",
+      "Report page navigation"
+    );
+
+    const status =
+      document.createElement(
+        "div"
+      );
+
+    status.className =
+      "report-page-status";
+
+    status.textContent =
+      "Page "
+      + (pageIndex + 1)
+      + " of "
+      + pages.length
+      + " — "
+      + tabs[
+          pageIndex
+        ].textContent.trim();
+
+    nav.appendChild(
+      status
+    );
+
+    function addButton(
+      label,
+      destination,
+      disabled
+    ) {
+      const button =
+        document.createElement(
+          "button"
+        );
+
+      button.type =
+        "button";
+
+      button.className =
+        "btn btn-outline-secondary btn-sm";
+
+      button.textContent =
+        label;
+
+      button.disabled =
+        disabled;
+
+      if (
+        destination >= 0
+        && destination < tabs.length
+      ) {
+        button.title =
+          tabs[
+            destination
+          ].textContent.trim();
+
+        button.setAttribute(
+          "aria-label",
+          label
+          + ": "
+          + button.title
+        );
+      }
+
+      if (
+        destination === pageIndex
+      ) {
+        button.className =
+          "btn btn-primary btn-sm";
+
+        button.setAttribute(
+          "aria-current",
+          "page"
+        );
+      }
+
+      button.addEventListener(
+        "click",
+        function () {
+          openPage(
+            destination
+          );
+        }
+      );
+
+      nav.appendChild(
+        button
+      );
+    }
+
+    addButton(
+      "← Previous",
+      pageIndex - 1,
+      pageIndex === 0
+    );
+
+    for (
+      let index = 0;
+      index < pages.length;
+      index++
+    ) {
+      addButton(
+        String(
+          index + 1
+        ),
+        index,
+        false
+      );
+    }
+
+    addButton(
+      "Next →",
+      pageIndex + 1,
+      pageIndex
+        === pages.length - 1
+    );
+
+    pages[
+      pageIndex
+    ].appendChild(
+      nav
+    );
+  }
+});
+</script>
+```
+
+```{=html}
+<style>
+.report-sources {
+  margin-top: 1.5rem;
+}
+
+.report-sources > summary {
+  cursor: pointer;
+  font-size: 0.95rem;
+  padding: 0.6rem 0;
+}
+
+.report-sources .footnotes {
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.report-sources .footnotes > h2 {
+  display: none;
+}
+
+.report-sources li {
+  margin-bottom: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.report-sources .footnote-back {
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
+</style>
+
+<script>
+document.addEventListener(
+  "DOMContentLoaded",
+  function () {
+    const notes =
+      document.querySelector(
+        "section.footnotes"
+      );
+
+    if (
+      !notes
+      || notes.dataset.deduplicated
+         === "true"
+    ) return;
+
+    const uniqueSources =
+      new Map();
+
+    const sourceById =
+      new Map();
+
+    const items =
+      Array.from(
+        notes.querySelectorAll(
+          ":scope > ol > li"
+        )
+      );
+
+    for (
+      const item of items
+    ) {
+      const copy =
+        item.cloneNode(
+          true
+        );
+
+      copy.querySelectorAll(
+        "a.footnote-back"
+      ).forEach(
+        a => a.remove()
+      );
+
+      const text =
+        copy.textContent
+        .replace(
+          /\s+/g,
+          " "
+        )
+        .trim();
+
+      const urls =
+        Array.from(
+          copy.querySelectorAll(
+            "a[href]"
+          ),
+          a =>
+            a.getAttribute(
+              "href"
+            )
+        );
+
+      const key =
+        JSON.stringify(
+          [
+            text,
+            urls
+          ]
+        );
+
+      let source =
+        uniqueSources.get(
+          key
+        );
+
+      if (!source) {
+        source = {
+          item: item,
+          number:
+            uniqueSources.size + 1
+        };
+
+        uniqueSources.set(
+          key,
+          source
+        );
+      }
+
+      sourceById.set(
+        item.id,
+        source
+      );
+
+      if (
+        item !== source.item
+      ) {
+        const paragraph =
+          source.item.querySelector(
+            "p"
+          )
+          || source.item;
+
+        for (
+          const backlink
+          of item.querySelectorAll(
+            "a.footnote-back"
+          )
+        ) {
+          paragraph.append(
+            " ",
+            backlink
+          );
+        }
+
+        item.remove();
+      }
+    }
+
+    for (
+      const link
+      of document.querySelectorAll(
+        "a.footnote-ref"
+      )
+    ) {
+      const oldId =
+        (
+          link.getAttribute(
+            "href"
+          )
+          || ""
+        )
+        .split(
+          "#"
+        )
+        .pop();
+
+      const source =
+        sourceById.get(
+          oldId
+        );
+
+      if (!source) continue;
+
+      link.setAttribute(
+        "href",
+        "#"
+        + source.item.id
+      );
+
+      link.setAttribute(
+        "data-footnote-href",
+        "#"
+        + source.item.id
+      );
+
+      link.setAttribute(
+        "aria-label",
+        "Source "
+        + source.number
+      );
+
+      const number =
+        link.querySelector(
+          "sup"
+        )
+        || link;
+
+      number.textContent =
+        source.number;
+    }
+
+    for (
+      const source
+      of uniqueSources.values()
+    ) {
+      source.item.setAttribute(
+        "value",
+        source.number
+      );
+
+      const backlinks =
+        source.item.querySelectorAll(
+          "a.footnote-back"
+        );
+
+      backlinks.forEach(
+        function (
+          link,
+          index
+        ) {
+          link.textContent =
+            backlinks.length > 1
+              ? "\u21A9\uFE0E"
+                + (index + 1)
+              : "\u21A9\uFE0E";
+
+          link.setAttribute(
+            "aria-label",
+            "Return to citation "
+            + (index + 1)
+          );
+
+          link.title =
+            "Return to citation "
+            + (index + 1);
+        }
+      );
+    }
+
+    let box =
+      notes.closest(
+        "details"
+      );
+
+    if (!box) {
+      box =
+        document.createElement(
+          "details"
+        );
+
+      const label =
+        document.createElement(
+          "summary"
+        );
+
+      box.appendChild(
+        label
+      );
+
+      notes.before(
+        box
+      );
+
+      box.appendChild(
+        notes
+      );
+    }
+
+    box.classList.add(
+      "report-sources"
+    );
+
+    box.querySelector(
+      "summary"
+    ).textContent =
+      "Sources and references ("
+      + uniqueSources.size
+      + ")";
+
+    notes.dataset.deduplicated =
+      "true";
+
+    function revealTarget(
+      hash
+    ) {
+      let id;
+
+      try {
+        id =
+          decodeURIComponent(
+            hash.replace(
+              /^#/,
+              ""
+            )
+          );
+      } catch {
+        return;
+      }
+
+      const source =
+        sourceById.get(
+          id
+        );
+
+      const target =
+        document.getElementById(
+          id
+        )
+        || (
+          source
+          && source.item
+        );
+
+      if (!target) return;
+
+      if (
+        notes.contains(
+          target
+        )
+      ) {
+        box.open =
+          true;
+      }
+
+      const panel =
+        target.closest(
+          ".tab-pane"
+        );
+
+      if (panel) {
+        const tab =
+          document.getElementById(
+            panel.getAttribute(
+              "aria-labelledby"
+            )
+          );
+
+        if (
+          tab
+          && !tab.classList.contains(
+            "active"
+          )
+        ) {
+          tab.click();
+        }
+      }
+
+      requestAnimationFrame(
+        function () {
+          target.scrollIntoView({
+            block: "center"
+          });
+        }
+      );
+    }
+
+    document.addEventListener(
+      "click",
+      function (event) {
+        if (
+          !(
+            event.target
+            instanceof Element
+          )
+        ) return;
+
+        if (
+          event.button !== 0
+          || event.ctrlKey
+          || event.metaKey
+          || event.shiftKey
+          || event.altKey
+        ) return;
+
+        const link =
+          event.target.closest(
+            "a.footnote-ref, "
+            + "a.footnote-back"
+          );
+
+        if (link) {
+          revealTarget(
+            link.getAttribute(
+              "href"
+            )
+            || ""
+          );
+        }
+      },
+      true
+    );
+
+    window.addEventListener(
+      "hashchange",
+      function () {
+        revealTarget(
+          location.hash
+        );
+      }
+    );
+
+    if (
+      location.hash
+    ) {
+      revealTarget(
+        location.hash
+      );
+    }
+  }
+);
+</script>
+```
+
+[^noaa-flags]: NOAA NCEI, *GHCN-Daily Documentation*, section II.B and Tables 1–2, https://www.ncei.noaa.gov/pub/data/cdo/documentation/GHCND_documentation.pdf.
+
+[^pandas-shift]: pandas documentation, *Series.shift*, https://pandas.pydata.org/docs/reference/api/pandas.Series.shift.html.
+
+[^pandas-rolling]: pandas documentation, *Series.rolling*, https://pandas.pydata.org/docs/reference/api/pandas.Series.rolling.html.
+
+[^kc-daily-flow]: King County, *Hydrologic Information Center*, description of average daily stream discharge rates, https://green2.kingcounty.gov/hydrology/.
+
+[^pandas-merge]: pandas documentation, *pandas.merge*, https://pandas.pydata.org/docs/reference/api/pandas.merge.html.
+
+[^time-design]: scikit-learn documentation, *TimeSeriesSplit* and *Common pitfalls: data leakage*, https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html and https://scikit-learn.org/stable/common_pitfalls.html.
+
+[^simple-baselines]: Hyndman and Athanasopoulos, *Forecasting: Principles and Practice*, Section 5.2, mean and naive forecasting methods, https://otexts.com/fpp3/simple-methods.html.
+
+[^baseline-errors]: scikit-learn documentation, *mean_absolute_error* and *root_mean_squared_error*, https://scikit-learn.org/stable/modules/generated/sklearn.metrics.mean_absolute_error.html and https://scikit-learn.org/stable/modules/generated/sklearn.metrics.root_mean_squared_error.html.
+
+[^ols-estimation]: Hyndman and Athanasopoulos, *Forecasting: Principles and Practice*, Section 7.2, Least squares estimation, https://otexts.com/fpp3/least-squares.html.
+
+[^statsmodels-ols]: statsmodels documentation, *OLS* and *add_constant*, https://www.statsmodels.org/stable/generated/statsmodels.regression.linear_model.OLS.html and https://www.statsmodels.org/stable/generated/statsmodels.tools.tools.add_constant.html.
+
+[^linear-model]: Hyndman and Athanasopoulos, *Forecasting: Principles and Practice*, Section 7.1, The linear model, https://otexts.com/fpp3/regression-intro.html.
+
+[^regression-diagnostics]: Hyndman and Athanasopoulos, *Forecasting: Principles and Practice*, Section 7.3, Evaluating the regression model, https://otexts.com/fpp3/regression-evaluation.html.
+
+[^ml-scaling]: scikit-learn documentation, *StandardScaler*, https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html.
+
+[^ml-ridge]: scikit-learn documentation, *Ridge*, https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Ridge.html.
+
+[^ml-tree]: scikit-learn documentation, *DecisionTreeRegressor*, https://scikit-learn.org/stable/modules/generated/sklearn.tree.DecisionTreeRegressor.html.
+
+[^ml-tree-text]: scikit-learn documentation, *export_text*, https://scikit-learn.org/stable/modules/generated/sklearn.tree.export_text.html.
+
+[^ml-forest]: scikit-learn documentation, *RandomForestRegressor*, https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestRegressor.html.
+
+[^pandas-quantile]: pandas documentation, *Series.quantile*, https://pandas.pydata.org/docs/reference/api/pandas.Series.quantile.html.
