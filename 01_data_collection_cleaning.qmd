@@ -1,6 +1,7 @@
 ---
 title: "Seattle Rainfall and Streamflow Prediction"
 subtitle: "Daily Precipitation, Streamflow, and Model Evaluation, 2015–2025"
+author: "Hao Jiang"
 format:
   html:
     toc: false
@@ -16,6 +17,8 @@ jupyter: python3
 
 ```{=html}
 <style>
+
+/* Main page width */
 #quarto-content > main.content {
   grid-column: 1 / -1 !important;
   width: min(1400px, calc(100vw - 120px));
@@ -25,13 +28,155 @@ jupyter: python3
   justify-self: center !important;
 }
 
+/* ---------- Title area ---------- */
 #title-block-header {
-  width: 100%;
-  max-width: none;
-  margin-left: 0;
-  margin-right: 0;
+  width: 100% !important;
+  max-width: none !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
 }
 
+#title-block-header .quarto-title {
+  display: block !important;
+  width: 100% !important;
+  max-width: none !important;
+}
+
+#title-block-header .quarto-title-block {
+  width: 100% !important;
+}
+
+#title-block-header .quarto-title-block > div {
+  width: 100% !important;
+}
+
+/* Main title */
+#title-block-header h1.title {
+  display: block !important;
+  width: 100% !important;
+  max-width: none !important;
+
+  text-align: center !important;
+
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+/* Subtitle */
+#title-block-header .subtitle {
+  display: block !important;
+  width: 100% !important;
+  max-width: none !important;
+
+  text-align: center !important;
+
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+/* Author */
+#title-block-header .quarto-title-meta {
+  display: flex !important;
+  justify-content: center !important;
+  text-align: center !important;
+}
+
+#title-block-header .quarto-title-meta-heading {
+  display: none !important;
+}
+
+#title-block-header .quarto-title-meta-contents {
+  text-align: center !important;
+}
+
+/* ---------- Code button ---------- */
+.centered-code-tools {
+  position: relative;
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  width: 100%;
+
+  margin-top: 0.4rem;
+  margin-bottom: 0.8rem;
+}
+
+.centered-code-tools .code-tools-button {
+  margin: 0 !important;
+}
+
+/* Arrow points right when closed */
+#quarto-code-tools-menu.dropdown-toggle::after {
+  transform: rotate(-90deg);
+  transform-origin: center;
+
+  vertical-align: 0.15em;
+  margin-left: 0.45rem;
+  transition: transform 0.15s ease;
+}
+
+/* ---------- Horizontal Code menu ---------- */
+.centered-code-tools .dropdown-menu.show {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+
+  position: absolute !important;
+
+  left: calc(50% + 90px) !important;
+  top: 50% !important;
+
+  transform: translateY(-50%) !important;
+
+  width: max-content !important;
+  min-width: 0 !important;
+
+  padding: 0.35rem 0.45rem !important;
+  margin: 0 !important;
+
+  white-space: nowrap;
+
+  border-radius: 8px;
+}
+
+/* Individual Code menu items */
+.centered-code-tools .dropdown-menu .dropdown-item {
+  width: auto !important;
+  padding: 0.45rem 0.8rem !important;
+}
+
+/* Vertical divider before View Source */
+.centered-code-tools .dropdown-menu .dropdown-divider {
+  width: 1px !important;
+  height: 24px !important;
+
+  margin: 0 0.35rem !important;
+
+  border-top: 0 !important;
+  border-left: 1px solid var(--bs-border-color) !important;
+}
+
+
+/* ---------- Seattle photograph ---------- */
+.seattle-hero {
+  width: 100%;
+
+  height: 520px;
+
+  object-fit: cover;
+  object-position: center 54%;
+
+  display: block;
+
+  margin: 1.5rem auto 2.2rem auto;
+
+  border-radius: 12px;
+}
+
+
+/* ---------- Report tabs ---------- */
 #report-tabs {
   width: 100%;
   margin-left: 0;
@@ -42,8 +187,56 @@ jupyter: python3
   width: 100%;
   justify-content: center;
 }
+
 </style>
+
+
+<script>
+
+document.addEventListener("DOMContentLoaded", function () {
+
+  const header =
+    document.querySelector("#title-block-header");
+
+  const button =
+    document.querySelector("#quarto-code-tools-menu");
+
+  const menu =
+    button ? button.nextElementSibling : null;
+
+
+  if (header && button) {
+
+    const container =
+      document.createElement("div");
+
+    container.className =
+      "centered-code-tools";
+
+
+    container.appendChild(button);
+
+
+    if (
+      menu &&
+      menu.classList.contains("dropdown-menu")
+    ) {
+
+      container.appendChild(menu);
+
+    }
+
+
+    header.appendChild(container);
+
+  }
+
+});
+
+</script>
 ```
+
+![](seattle_skyline.JPG){.seattle-hero fig-alt="Seattle skyline at dusk"}
 
 ::: {#report-tabs .panel-tabset}
 
